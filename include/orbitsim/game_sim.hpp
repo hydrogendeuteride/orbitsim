@@ -24,6 +24,7 @@ namespace orbitsim
             double softening_length_m{0.0};
             DOPRI5Options spacecraft_integrator{};
             EventOptions events{};
+            bool enable_events{true};
         };
 
         GameSimulation() = default;
@@ -73,6 +74,11 @@ namespace orbitsim
         {
             if (!(dt_s != 0.0) || !std::isfinite(dt_s))
             {
+                return;
+            }
+            if (!cfg_.enable_events || cfg_.events.max_event_splits_per_step <= 0)
+            {
+                do_step_no_events_(dt_s);
                 return;
             }
             if (dt_s < 0.0)
@@ -190,6 +196,23 @@ namespace orbitsim
             Spacecraft out = sc0;
             if (!(dt_s != 0.0) || !std::isfinite(dt_s))
             {
+                return out;
+            }
+            if (dt_s < 0.0)
+            {
+                // Backwards integration currently supports gravity-only (no maneuvers, no prop changes).
+                const SpacecraftKinematics y0{out.state.position_m, out.state.velocity_mps};
+                auto accel = [&](double t_eval_s, const Vec3 &pos_m, const Vec3 & /*vel_mps*/) -> Vec3 {
+                    return gravity_accel_mps2_(eph, t_eval_s, pos_m);
+                };
+                DOPRI5Stats stats{};
+                const SpacecraftKinematics y1 =
+                        dopri5_integrate_interval(t0_s, y0, dt_s, accel, cfg_.spacecraft_integrator, &stats);
+                (void) stats;
+
+                out.state.position_m = y1.position_m;
+                out.state.velocity_mps = y1.velocity_mps;
+                advance_spin(out.state.spin, dt_s);
                 return out;
             }
 

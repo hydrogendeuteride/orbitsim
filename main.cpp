@@ -2,11 +2,12 @@
 
 #include <glm/glm.hpp>
 
+#include <cmath>
 #include <cstdio>
 
 int main()
 {
-    orbitsim::NBodySimulation sim;
+    orbitsim::GameSimulation sim;
 
     constexpr double Ms = 1.98847e30; // kg
     constexpr double Me = 5.9722e24; // kg
@@ -21,6 +22,7 @@ int main()
     const double m_tot = Ms + Me;
     orbitsim::MassiveBody sun{
             .mass_kg = Ms,
+            .radius_m = 6.9634e8,
             .state =
                     {
                             .position_m = -(Me / m_tot) * r_rel,
@@ -30,6 +32,9 @@ int main()
     };
     orbitsim::MassiveBody earth{
             .mass_kg = Me,
+            .radius_m = 6.371e6,
+            .atmosphere_top_height_m = 1.0e5,
+            .soi_radius_m = 9.25e8,
             .state =
                     {
                             .position_m = (Ms / m_tot) * r_rel,
@@ -49,8 +54,24 @@ int main()
                             .velocity_mps = earth.state.velocity_mps + orbitsim::Vec3{0.0, 0.0, 0.0},
                             .spin = {.axis = {0.0, 0.0, 1.0}, .angle_rad = 0.0, .rate_rad_per_s = 0.0},
                     },
+            .dry_mass_kg = 800.0,
+            .prop_mass_kg = 200.0,
+            .engines =
+                    {
+                            {.max_thrust_N = 2'000.0, .isp_s = 300.0, .min_throttle_0_1 = 0.05},
+                    },
     };
     sim.spacecraft().push_back(sc);
+
+    // A short prograde burn in RTN (relative to Earth as primary).
+    sim.maneuver_plan().segments.push_back(orbitsim::BurnSegment{
+            .t_start_s = 3600.0,
+            .t_end_s = 4200.0,
+            .primary_index = 1,
+            .dir_rtn_unit = {0.0, 1.0, 0.0},
+            .throttle_0_1 = 1.0,
+            .engine_index = 0,
+    });
 
     constexpr double dt = 60.0; // s
     constexpr int steps = 24 * 60; // 1 day
@@ -69,6 +90,15 @@ int main()
                 sc_out.position_m.z / 1000.0);
     std::printf("earth spin axis: %.3f %.3f %.3f, angle(rad)=%.6f\n", earth_out.spin.axis.x, earth_out.spin.axis.y,
                 earth_out.spin.axis.z, earth_out.spin.angle_rad);
+
+    const orbitsim::Vec3 r_sc_rel = sc_out.position_m - earth_out.position_m;
+    const orbitsim::Vec3 v_sc_rel = sc_out.velocity_mps - earth_out.velocity_mps;
+    const double mu_earth = orbitsim::kGravitationalConstant_SI * earth.mass_kg;
+    const orbitsim::OrbitalElements el = orbitsim::orbital_elements_from_relative_state(mu_earth, r_sc_rel, v_sc_rel);
+    std::printf("sc elements wrt Earth: a(km)=%.3f e=%.6f i(deg)=%.6f\n",
+                el.semi_major_axis_m / 1000.0,
+                el.eccentricity,
+                el.inclination_rad * 180.0 / std::acos(-1.0));
 
     return 0;
 }
