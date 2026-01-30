@@ -5,53 +5,77 @@
 
 int main()
 {
-    orbitsim::GameSimulation sim;
+    using namespace orbitsim;
+
+    GameSimulation::Config cfg{};
+    cfg.spacecraft_integrator.max_step_s = 2.0;
+    cfg.spacecraft_integrator.max_substeps = 512;
+    GameSimulation sim(cfg);
 
     constexpr double Ms = 1.98847e30; // kg
     constexpr double Me = 5.9722e24; // kg
+    constexpr double Mm = 7.342e22; // kg
     constexpr double AU = 1.495978707e11; // m
 
-    const orbitsim::Vec3 r_rel{AU, 0.0, 0.0};
-    const double mu = orbitsim::kGravitationalConstant_SI * (Ms + Me);
-    const double v_rel_mag = std::sqrt(mu / glm::length(r_rel));
-    const orbitsim::Vec3 v_rel{0.0, v_rel_mag, 0.0};
+    const double m_em = Me + Mm;
 
-    // Barycentric initial conditions for a simple Sun/Earth circular orbit.
-    const double m_tot = Ms + Me;
-    orbitsim::MassiveBody sun{
+    // Sun <-> Earth-Moon barycenter initial conditions (tilted for 3D visualization).
+    const double inc_em_rad = glm::radians(10.0);
+    const auto [sun_state, em_bary_state] = two_body_circular_barycentric(Ms, m_em, AU, inc_em_rad);
+
+    MassiveBody sun{
             .mass_kg = Ms,
             .radius_m = 6.9634e8,
-            .state =
-                    {
-                            .position_m = -(Me / m_tot) * r_rel,
-                            .velocity_mps = -(Me / m_tot) * v_rel,
-                            .spin = {.axis = {0.0, 1.0, 0.0}, .angle_rad = 0.0, .rate_rad_per_s = 2.9e-6},
-                    },
+            .state = make_state(sun_state.position_m, sun_state.velocity_mps, {0.0, 1.0, 0.0}, 2.9e-6),
     };
-    orbitsim::MassiveBody earth{
+
+    // Earth <-> Moon circular orbit around their barycenter (slightly inclined).
+    constexpr double d_em_m = 384'400'000.0; // mean distance [m]
+    const double inc_moon_rad = glm::radians(5.0);
+    const auto [earth_rel, moon_rel] = two_body_circular_barycentric(Me, Mm, d_em_m, inc_moon_rad);
+
+    MassiveBody earth{
             .mass_kg = Me,
             .radius_m = 6.371e6,
             .atmosphere_top_height_m = 1.0e5,
             .soi_radius_m = 9.25e8,
-            .state =
-                    {
-                            .position_m = (Ms / m_tot) * r_rel,
-                            .velocity_mps = (Ms / m_tot) * v_rel,
-                            .spin = {.axis = {0.0, 1.0, 0.0}, .angle_rad = 0.0, .rate_rad_per_s = 7.2921159e-5},
-                    },
+            .state = make_state(em_bary_state.position_m + earth_rel.position_m,
+                                em_bary_state.velocity_mps + earth_rel.velocity_mps, {0.0, 1.0, 0.0}, 7.2921159e-5),
+    };
+    MassiveBody moon{
+            .mass_kg = Mm,
+            .radius_m = 1.7374e6,
+            .soi_radius_m = 6.61e7,
+            .state = make_state(em_bary_state.position_m + moon_rel.position_m,
+                                em_bary_state.velocity_mps + moon_rel.velocity_mps, {0.0, 1.0, 0.0}, 2.66e-6),
     };
 
-    sim.massive_bodies().push_back(sun);
-    sim.massive_bodies().push_back(earth);
+    const GameSimulation::BodyHandle sun_h = sim.create_body(std::move(sun));
+    const GameSimulation::BodyHandle earth_h = sim.create_body(std::move(earth));
+    const GameSimulation::BodyHandle moon_h = sim.create_body(std::move(moon));
+    if (!sun_h.valid() || !earth_h.valid() || !moon_h.valid())
+    {
+        return 1;
+    }
+    const BodyId sun_id = sun_h.id;
+    const BodyId earth_id = earth_h.id;
+    const BodyId moon_id = moon_h.id;
+    const MassiveBody *earth_ptr = sim.body_by_id(earth_id);
+    const MassiveBody *moon_ptr = sim.body_by_id(moon_id);
+    if (earth_ptr == nullptr || moon_ptr == nullptr)
+    {
+        return 1;
+    }
 
-    // A "spacecraft" near Earth, initially co-moving.
-    orbitsim::Spacecraft sc{
-            .state =
-                    {
-                            .position_m = earth.state.position_m + orbitsim::Vec3{42'000'000.0, 0.0, 0.0},
-                            .velocity_mps = earth.state.velocity_mps + orbitsim::Vec3{0.0, 0.0, 0.0},
-                            .spin = {.axis = {0.0, 0.0, 1.0}, .angle_rad = 0.0, .rate_rad_per_s = 0.0},
-                    },
+    // A spacecraft in LEO with a few planned burns (Earth injection + mid-course correction + lunar capture).
+    const double sc_altitude_m = 300'000.0;
+    const double sc_inc_rad = glm::radians(28.5);
+    const auto sc_orbit = circular_orbit_relative_state(earth_ptr->mass_kg, earth_ptr->radius_m + sc_altitude_m, sc_inc_rad);
+
+    Spacecraft sc{
+            .state = make_state(earth_ptr->state.position_m + sc_orbit.position_m,
+                                earth_ptr->state.velocity_mps + sc_orbit.velocity_mps,
+                                {0.0, 0.0, 1.0}, 0.0),
             .dry_mass_kg = 800.0,
             .prop_mass_kg = 200.0,
             .engines =
@@ -59,50 +83,111 @@ int main()
                             {.max_thrust_N = 2'000.0, .isp_s = 300.0, .min_throttle_0_1 = 0.05},
                     },
     };
-    sim.spacecraft().push_back(sc);
-
-    // A short prograde burn in RTN (relative to Earth as primary).
-    sim.maneuver_plan().segments.push_back(orbitsim::BurnSegment{
-            .t_start_s = 3600.0,
-            .t_end_s = 4200.0,
-            .primary_index = 1,
-            .dir_rtn_unit = {0.0, 1.0, 0.0},
-            .throttle_0_1 = 1.0,
-            .engine_index = 0,
-            .spacecraft_index = 0,
-    });
-
-    constexpr double dt = 60.0; // s
-    constexpr int steps = 24 * 60; // 1 day
-
-    for (int i = 0; i < steps; ++i)
+    const GameSimulation::SpacecraftHandle sc_h = sim.create_spacecraft(std::move(sc));
+    if (!sc_h.valid())
     {
-        sim.step(dt);
+        return 1;
     }
+    const SpacecraftId sc_id = sc_h.id;
+
+    // Injection burn: prograde in RTN (Earth primary).
+    sim.maneuver_plan().segments.push_back(
+            burn().start(hours(2.0))
+                  .duration(minutes(20.0))
+                  .prograde()
+                  .primary(earth_id)
+                  .spacecraft(sc_id));
+
+    // Mid-course correction: small normal component in RTN (Earth primary).
+    sim.maneuver_plan().segments.push_back(
+            burn().start(days(2.0))
+                  .duration(minutes(5.0))
+                  .normal()
+                  .throttle(0.4)
+                  .primary(earth_id)
+                  .spacecraft(sc_id));
+
+    // Lunar capture attempt: retrograde in RTN (Moon primary).
+    sim.maneuver_plan().segments.push_back(
+            burn().start(days(4.5))
+                  .duration(minutes(15.0))
+                  .retrograde()
+                  .throttle(0.7)
+                  .primary(moon_id)
+                  .spacecraft(sc_id));
 
     // Trajectory sampling helpers (useful for rendering orbit lines):
     // - Build a celestial ephemeris once (massive bodies only)
     // - Sample any body/spacecraft trajectory against that ephemeris
-    orbitsim::TrajectoryOptions traj_opt{};
-    traj_opt.duration_s = 6.0 * 3600.0;
-    traj_opt.sample_dt_s = 5.0 * 60.0;
-    traj_opt.celestial_dt_s = 60.0;
-    traj_opt.max_samples = 4096;
+    const auto traj_opt = trajectory_options()
+            .duration(days(20.0))
+            .sample_dt(minutes(10.0))
+            .celestial_dt(minutes(5.0))
+            .max_samples(100'000);
 
-    const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris(sim, traj_opt);
+    const CelestialEphemeris eph = build_celestial_ephemeris(sim, traj_opt);
 
-    // Earth orbit around Sun (relative to the Sun).
-    traj_opt.origin_body_index = 0;
-    const std::vector<orbitsim::TrajectorySample> earth_traj = orbitsim::predict_body_trajectory(sim, eph, 1, traj_opt);
+    // Earth/Moon orbits around Sun (relative to the Sun).
+    const auto traj_opt_sun = trajectory_options()
+            .duration(days(20.0))
+            .sample_dt(minutes(10.0))
+            .celestial_dt(minutes(5.0))
+            .max_samples(100'000)
+            .origin(sun_id);
+    const std::vector<TrajectorySample> earth_traj = predict_body_trajectory(sim, eph, earth_id, traj_opt_sun);
+    const std::vector<TrajectorySample> moon_traj_sun = predict_body_trajectory(sim, eph, moon_id, traj_opt_sun);
+    const std::vector<TrajectorySample> sc_traj_sun = predict_spacecraft_trajectory(sim, eph, sc_id, traj_opt_sun);
 
-    // Spacecraft orbit around Earth (relative to Earth).
-    traj_opt.origin_body_index = 1;
-    const std::vector<orbitsim::TrajectorySample> sc_traj =
-            orbitsim::predict_spacecraft_trajectory(sim, eph, 0, traj_opt);
+    // Moon + spacecraft around Earth (relative to Earth).
+    const auto traj_opt_earth = trajectory_options()
+            .duration(days(20.0))
+            .sample_dt(minutes(10.0))
+            .celestial_dt(minutes(5.0))
+            .max_samples(100'000)
+            .origin(earth_id);
+    const std::vector<TrajectorySample> moon_traj_earth = predict_body_trajectory(sim, eph, moon_id, traj_opt_earth);
+    const std::vector<TrajectorySample> sc_traj = predict_spacecraft_trajectory(sim, eph, sc_id, traj_opt_earth);
+
+    // High-resolution spacecraft path near Earth for smooth LEO rendering.
+    const auto earth_hi = trajectory_options()
+            .duration(hours(8.0))
+            .sample_dt(seconds(5.0))
+            .spacecraft_sample_dt(seconds(5.0))
+            .celestial_dt(seconds(30.0))
+            .max_samples(50'000)
+            .origin(earth_id);
+    const std::vector<TrajectorySample> sc_traj_earth_hi = predict_spacecraft_trajectory(sim, eph, sc_id, earth_hi);
+
+    // Spacecraft around Moon (relative to Moon).
+    const auto traj_opt_moon = trajectory_options()
+            .duration(days(20.0))
+            .sample_dt(minutes(10.0))
+            .celestial_dt(minutes(5.0))
+            .max_samples(100'000)
+            .origin(moon_id);
+    const std::vector<TrajectorySample> sc_traj_moon = predict_spacecraft_trajectory(sim, eph, sc_id, traj_opt_moon);
 
     std::printf("\n--- trajectory csv (t_s,x_m,y_m,z_m,vx_mps,vy_mps,vz_mps) ---\n");
     std::printf("earth_rel_sun\n");
     for (const auto &s: earth_traj)
+    {
+        std::printf("%.0f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n", s.t_s, s.position_m.x, s.position_m.y, s.position_m.z,
+                    s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
+    }
+    std::printf("moon_rel_sun\n");
+    for (const auto &s: moon_traj_sun)
+    {
+        std::printf("%.0f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n", s.t_s, s.position_m.x, s.position_m.y, s.position_m.z,
+                    s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
+    }
+    std::printf("sc_rel_sun\n");
+    for (const auto &s: sc_traj_sun)
+    {
+        std::printf("%.0f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n", s.t_s, s.position_m.x, s.position_m.y, s.position_m.z,
+                    s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
+    }
+    std::printf("moon_rel_earth\n");
+    for (const auto &s: moon_traj_earth)
     {
         std::printf("%.0f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n", s.t_s, s.position_m.x, s.position_m.y, s.position_m.z,
                     s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
@@ -113,23 +198,18 @@ int main()
         std::printf("%.0f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n", s.t_s, s.position_m.x, s.position_m.y, s.position_m.z,
                     s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
     }
-
-    const auto &earth_out = sim.massive_bodies()[1].state;
-    const auto &sc_out = sim.spacecraft()[0].state;
-    std::printf("t = %.0f s\n", sim.time_s());
-    std::printf("earth pos (km): %.3f %.3f %.3f\n", earth_out.position_m.x / 1000.0, earth_out.position_m.y / 1000.0,
-                earth_out.position_m.z / 1000.0);
-    std::printf("sc pos (km):    %.3f %.3f %.3f\n", sc_out.position_m.x / 1000.0, sc_out.position_m.y / 1000.0,
-                sc_out.position_m.z / 1000.0);
-    std::printf("earth spin axis: %.3f %.3f %.3f, angle(rad)=%.6f\n", earth_out.spin.axis.x, earth_out.spin.axis.y,
-                earth_out.spin.axis.z, earth_out.spin.angle_rad);
-
-    const orbitsim::Vec3 r_sc_rel = sc_out.position_m - earth_out.position_m;
-    const orbitsim::Vec3 v_sc_rel = sc_out.velocity_mps - earth_out.velocity_mps;
-    const double mu_earth = orbitsim::kGravitationalConstant_SI * earth.mass_kg;
-    const orbitsim::OrbitalElements el = orbitsim::orbital_elements_from_relative_state(mu_earth, r_sc_rel, v_sc_rel);
-    std::printf("sc elements wrt Earth: a(km)=%.3f e=%.6f i(deg)=%.6f\n", el.semi_major_axis_m / 1000.0,
-                el.eccentricity, el.inclination_rad * 180.0 / std::acos(-1.0));
+    std::printf("sc_rel_earth_hi\n");
+    for (const auto &s: sc_traj_earth_hi)
+    {
+        std::printf("%.0f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n", s.t_s, s.position_m.x, s.position_m.y, s.position_m.z,
+                    s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
+    }
+    std::printf("sc_rel_moon\n");
+    for (const auto &s: sc_traj_moon)
+    {
+        std::printf("%.0f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n", s.t_s, s.position_m.x, s.position_m.y, s.position_m.z,
+                    s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
+    }
 
     return 0;
 }

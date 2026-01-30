@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -19,6 +20,22 @@ namespace orbitsim
     class GameSimulation
     {
     public:
+        struct BodyHandle
+        {
+            BodyId id{kInvalidBodyId};
+
+            inline bool valid() const { return id != kInvalidBodyId; }
+            inline operator BodyId() const { return id; }
+        };
+
+        struct SpacecraftHandle
+        {
+            SpacecraftId id{kInvalidSpacecraftId};
+
+            inline bool valid() const { return id != kInvalidSpacecraftId; }
+            inline operator SpacecraftId() const { return id; }
+        };
+
         struct Config
         {
             double gravitational_constant{orbitsim::kGravitationalConstant_SI};
@@ -34,22 +51,210 @@ namespace orbitsim
         double time_s() const { return time_s_; }
         const Config &config() const { return cfg_; }
 
-        std::vector<MassiveBody> &massive_bodies() { return massive_; }
         const std::vector<MassiveBody> &massive_bodies() const { return massive_; }
 
-        std::vector<Spacecraft> &spacecraft() { return spacecraft_; }
+        BodyId allocate_body_id()
+        {
+            BodyId id = next_body_id_++;
+            if (id == kInvalidBodyId)
+            {
+                id = next_body_id_++;
+            }
+            while (body_id_to_index_.contains(id) || id == kInvalidBodyId)
+            {
+                id = next_body_id_++;
+            }
+            return id;
+        }
+
+        BodyId add_body(MassiveBody body)
+        {
+            if (body.id == kInvalidBodyId)
+            {
+                body.id = allocate_body_id();
+            }
+            if (body_id_to_index_.contains(body.id))
+            {
+                return kInvalidBodyId;
+            }
+
+            body_id_to_index_[body.id] = massive_.size();
+            massive_.push_back(std::move(body));
+            return massive_.back().id;
+        }
+
+        BodyId add_body_with_id(const BodyId id, MassiveBody body)
+        {
+            if (id == kInvalidBodyId)
+            {
+                return kInvalidBodyId;
+            }
+            body.id = id;
+            return add_body(std::move(body));
+        }
+
+        BodyHandle create_body(MassiveBody body)
+        {
+            const BodyId id = add_body(std::move(body));
+            return BodyHandle{.id = id};
+        }
+
+        BodyHandle create_body_with_id(const BodyId id, MassiveBody body)
+        {
+            const BodyId out = add_body_with_id(id, std::move(body));
+            return BodyHandle{.id = out};
+        }
+
+        MassiveBody *body_by_id(const BodyId id)
+        {
+            auto it = body_id_to_index_.find(id);
+            if (it == body_id_to_index_.end())
+            {
+                return nullptr;
+            }
+            return &massive_[it->second];
+        }
+
+        const MassiveBody *body_by_id(const BodyId id) const
+        {
+            auto it = body_id_to_index_.find(id);
+            if (it == body_id_to_index_.end())
+            {
+                return nullptr;
+            }
+            return &massive_[it->second];
+        }
+
+        bool has_body(const BodyId id) const { return body_id_to_index_.contains(id); }
+
+        bool remove_body(const BodyId id)
+        {
+            auto it = body_id_to_index_.find(id);
+            if (it == body_id_to_index_.end())
+            {
+                return false;
+            }
+
+            const std::size_t index = it->second;
+            const std::size_t last = massive_.empty() ? 0 : (massive_.size() - 1);
+            if (index != last)
+            {
+                massive_[index] = std::move(massive_[last]);
+                body_id_to_index_[massive_[index].id] = index;
+            }
+
+            massive_.pop_back();
+            body_id_to_index_.erase(it);
+            return true;
+        }
+
         const std::vector<Spacecraft> &spacecraft() const { return spacecraft_; }
+
+        SpacecraftId allocate_spacecraft_id()
+        {
+            SpacecraftId id = next_spacecraft_id_++;
+            if (id == kInvalidSpacecraftId || id == kAllSpacecraft)
+            {
+                id = next_spacecraft_id_++;
+            }
+            while (spacecraft_id_to_index_.contains(id) || id == kInvalidSpacecraftId || id == kAllSpacecraft)
+            {
+                id = next_spacecraft_id_++;
+            }
+            return id;
+        }
+
+        SpacecraftId add_spacecraft(Spacecraft sc)
+        {
+            if (sc.id == kInvalidSpacecraftId || sc.id == kAllSpacecraft)
+            {
+                sc.id = allocate_spacecraft_id();
+            }
+            if (spacecraft_id_to_index_.contains(sc.id))
+            {
+                return kInvalidSpacecraftId;
+            }
+
+            spacecraft_id_to_index_[sc.id] = spacecraft_.size();
+            spacecraft_.push_back(std::move(sc));
+            return spacecraft_.back().id;
+        }
+
+        SpacecraftId add_spacecraft_with_id(const SpacecraftId id, Spacecraft sc)
+        {
+            if (id == kInvalidSpacecraftId || id == kAllSpacecraft)
+            {
+                return kInvalidSpacecraftId;
+            }
+            sc.id = id;
+            return add_spacecraft(std::move(sc));
+        }
+
+        SpacecraftHandle create_spacecraft(Spacecraft sc)
+        {
+            const SpacecraftId id = add_spacecraft(std::move(sc));
+            return SpacecraftHandle{.id = id};
+        }
+
+        SpacecraftHandle create_spacecraft_with_id(const SpacecraftId id, Spacecraft sc)
+        {
+            const SpacecraftId out = add_spacecraft_with_id(id, std::move(sc));
+            return SpacecraftHandle{.id = out};
+        }
+
+        bool has_spacecraft(const SpacecraftId id) const { return spacecraft_id_to_index_.contains(id); }
+
+        Spacecraft *spacecraft_by_id(const SpacecraftId id)
+        {
+            auto it = spacecraft_id_to_index_.find(id);
+            if (it == spacecraft_id_to_index_.end())
+            {
+                return nullptr;
+            }
+            return &spacecraft_[it->second];
+        }
+
+        const Spacecraft *spacecraft_by_id(const SpacecraftId id) const
+        {
+            auto it = spacecraft_id_to_index_.find(id);
+            if (it == spacecraft_id_to_index_.end())
+            {
+                return nullptr;
+            }
+            return &spacecraft_[it->second];
+        }
+
+        bool remove_spacecraft(const SpacecraftId id)
+        {
+            auto it = spacecraft_id_to_index_.find(id);
+            if (it == spacecraft_id_to_index_.end())
+            {
+                return false;
+            }
+
+            const std::size_t index = it->second;
+            const std::size_t last = spacecraft_.empty() ? 0 : (spacecraft_.size() - 1);
+            if (index != last)
+            {
+                spacecraft_[index] = std::move(spacecraft_[last]);
+                spacecraft_id_to_index_[spacecraft_[index].id] = index;
+            }
+
+            spacecraft_.pop_back();
+            spacecraft_id_to_index_.erase(it);
+            return true;
+        }
 
         ManeuverPlan &maneuver_plan() { return plan_; }
         const ManeuverPlan &maneuver_plan() const { return plan_; }
 
-        std::size_t select_primary_by_max_accel(const std::size_t spacecraft_index) const
+        std::size_t select_primary_by_max_accel(const Spacecraft &sc) const
         {
-            if (spacecraft_index >= spacecraft_.size() || massive_.empty())
+            if (massive_.empty())
             {
                 return 0;
             }
-            const Vec3 p = spacecraft_[spacecraft_index].state.position_m;
+            const Vec3 p = sc.state.position_m;
             const double eps2 = cfg_.softening_length_m * cfg_.softening_length_m;
 
             std::size_t best = 0;
@@ -105,15 +310,14 @@ namespace orbitsim
                 preview_step_no_events_(massive_preview, spacecraft_preview, t_preview, remaining, &eph_preview);
 
                 std::optional<Event> best;
-                for (std::size_t sc_index = 0; sc_index < spacecraft_.size(); ++sc_index)
+                for (const auto &sc: spacecraft_)
                 {
-                    const auto &sc = spacecraft_[sc_index];
                     auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
                                             const double dt_sc_s) -> Spacecraft {
-                        return propagate_spacecraft_(sc_start, eph_preview, t0_s, dt_sc_s, sc_index);
+                        return propagate_spacecraft_(sc_start, eph_preview, t0_s, dt_sc_s);
                     };
                     const std::optional<Event> e = find_earliest_event_in_interval(
-                            massive_, eph_preview, sc, time_s_, remaining, plan_, cfg_.events, propagate_sc, sc_index);
+                            massive_, eph_preview, sc, time_s_, remaining, plan_, cfg_.events, propagate_sc);
                     if (e.has_value() && (!best.has_value() || e->t_event_s < best->t_event_s))
                     {
                         best = e;
@@ -128,7 +332,7 @@ namespace orbitsim
 
                     for (std::size_t sc_index = 0; sc_index < spacecraft_.size(); ++sc_index)
                     {
-                        spacecraft_[sc_index] = propagate_spacecraft_(spacecraft_[sc_index], eph_preview, time_s_, remaining, sc_index);
+                        spacecraft_[sc_index] = propagate_spacecraft_(spacecraft_[sc_index], eph_preview, time_s_, remaining);
                     }
 
                     time_s_ = t_preview;
@@ -169,12 +373,11 @@ namespace orbitsim
 	        }
 
 	        inline Spacecraft propagate_spacecraft_(const Spacecraft &sc0, const CelestialEphemerisSegment &eph,
-	                                                const double t0_s, const double dt_s,
-	                                                const std::size_t spacecraft_index) const
+	                                                const double t0_s, const double dt_s) const
 	        {
 	            return detail::propagate_spacecraft_in_ephemeris(
 	                    sc0, massive_, eph, plan_, cfg_.gravitational_constant, cfg_.softening_length_m,
-	                    cfg_.spacecraft_integrator, t0_s, dt_s, spacecraft_index);
+	                    cfg_.spacecraft_integrator, t0_s, dt_s);
 	        }
 
 	        inline void preview_step_no_events_(std::vector<MassiveBody> &massive, std::vector<Spacecraft> &spacecraft,
@@ -228,7 +431,7 @@ namespace orbitsim
 
             for (std::size_t sc_index = 0; sc_index < spacecraft_.size(); ++sc_index)
             {
-                spacecraft_[sc_index] = propagate_spacecraft_(spacecraft_[sc_index], eph, time_s_, dt_s, sc_index);
+                spacecraft_[sc_index] = propagate_spacecraft_(spacecraft_[sc_index], eph, time_s_, dt_s);
             }
 
             time_s_ += dt_s;
@@ -238,6 +441,10 @@ namespace orbitsim
         double time_s_{0.0};
         std::vector<MassiveBody> massive_{};
         std::vector<Spacecraft> spacecraft_{};
+        BodyId next_body_id_{1};
+        std::unordered_map<BodyId, std::size_t> body_id_to_index_{};
+        SpacecraftId next_spacecraft_id_{1};
+        std::unordered_map<SpacecraftId, std::size_t> spacecraft_id_to_index_{};
         ManeuverPlan plan_{};
     };
 

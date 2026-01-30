@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
+#include <unordered_map>
 #include <vector>
 
 namespace orbitsim
@@ -61,8 +62,37 @@ namespace orbitsim
     {
     public:
         std::vector<CelestialEphemerisSegment> segments{};
+        std::vector<BodyId> body_ids{};
+        std::unordered_map<BodyId, std::size_t> body_id_to_index{};
 
         inline bool empty() const { return segments.empty(); }
+
+        inline void set_body_ids(std::vector<BodyId> ids)
+        {
+            body_ids = std::move(ids);
+            body_id_to_index.clear();
+            body_id_to_index.reserve(body_ids.size());
+            for (std::size_t i = 0; i < body_ids.size(); ++i)
+            {
+                body_id_to_index[body_ids[i]] = i;
+            }
+        }
+
+        inline bool body_index_for_id(const BodyId id, std::size_t *out_index) const
+        {
+            if (out_index == nullptr)
+            {
+                return false;
+            }
+            *out_index = 0;
+            auto it = body_id_to_index.find(id);
+            if (it == body_id_to_index.end())
+            {
+                return false;
+            }
+            *out_index = it->second;
+            return true;
+        }
 
         inline double t0_s() const
         {
@@ -116,6 +146,26 @@ namespace orbitsim
         inline Vec3 body_velocity_at(const std::size_t body_index, const double t_s) const
         {
             return body_state_at(body_index, t_s).velocity_mps;
+        }
+
+        inline State body_state_at_by_id(const BodyId body_id, const double t_s) const
+        {
+            std::size_t index = 0;
+            if (!body_index_for_id(body_id, &index))
+            {
+                return {};
+            }
+            return body_state_at(index, t_s);
+        }
+
+        inline Vec3 body_position_at_by_id(const BodyId body_id, const double t_s) const
+        {
+            return body_state_at_by_id(body_id, t_s).position_m;
+        }
+
+        inline Vec3 body_velocity_at_by_id(const BodyId body_id, const double t_s) const
+        {
+            return body_state_at_by_id(body_id, t_s).velocity_mps;
         }
     };
 } // namespace orbitsim

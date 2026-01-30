@@ -28,10 +28,10 @@ namespace orbitsim
     struct Event
     {
         EventType type{EventType::Impact};
-        std::size_t body_index{0};
+        BodyId body_id{kInvalidBodyId};
         Crossing crossing{Crossing::Enter};
         double t_event_s{0.0};
-        std::size_t spacecraft_index{0};
+        SpacecraftId spacecraft_id{kInvalidSpacecraftId};
     };
 
     struct EventOptions
@@ -85,8 +85,7 @@ namespace orbitsim
     inline std::optional<Event>
     find_earliest_event_in_interval(const std::vector<MassiveBody> &bodies, const CelestialEphemerisSegment &eph,
                                     const Spacecraft &sc0, const double t0_s, const double dt_s,
-                                    const ManeuverPlan &plan, const EventOptions &opt, Propagator propagate_sc,
-                                    const std::size_t spacecraft_index = 0)
+                                    const ManeuverPlan &plan, const EventOptions &opt, Propagator propagate_sc)
     {
         (void) plan;
         if (!(dt_s > 0.0) || !std::isfinite(dt_s) || !(opt.max_bisect_iters > 0))
@@ -175,10 +174,10 @@ namespace orbitsim
                 {
                     best = Event{
                             .type = type,
-                            .body_index = body_index,
+                            .body_id = bodies[body_index].id,
                             .crossing = crossing,
                             .t_event_s = t_event,
-                            .spacecraft_index = spacecraft_index,
+                            .spacecraft_id = sc0.id,
                     };
                 }
             }

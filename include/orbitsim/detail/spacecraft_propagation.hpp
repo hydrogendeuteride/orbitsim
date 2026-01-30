@@ -56,8 +56,7 @@ namespace orbitsim::detail
     inline Spacecraft propagate_spacecraft_in_ephemeris(
             const Spacecraft &sc0, const std::vector<MassiveBody> &bodies, const EphemerisLike &eph,
             const ManeuverPlan &plan, const double gravitational_constant, const double softening_length_m,
-            const DOPRI5Options &spacecraft_integrator, const double t0_s, const double dt_s,
-            const std::size_t spacecraft_index)
+            const DOPRI5Options &spacecraft_integrator, const double t0_s, const double dt_s)
     {
         Spacecraft out = sc0;
         if (!(dt_s != 0.0) || !std::isfinite(dt_s))
@@ -72,10 +71,8 @@ namespace orbitsim::detail
             auto accel = [&](double t_eval_s, const Vec3 &pos_m, const Vec3 & /*vel_mps*/) -> Vec3 {
                 return gravity_accel_mps2(eph, bodies, gravitational_constant, softening_length_m, t_eval_s, pos_m);
             };
-            DOPRI5Stats stats{};
             const SpacecraftKinematics y1 =
-                    dopri5_integrate_interval(t0_s, y0, dt_s, accel, spacecraft_integrator, &stats);
-            (void) stats;
+                    dopri5_integrate_interval(t0_s, y0, dt_s, accel, spacecraft_integrator);
 
             out.state.position_m = y1.position_m;
             out.state.velocity_mps = y1.velocity_mps;
@@ -87,12 +84,35 @@ namespace orbitsim::detail
         double t = t0_s;
         double remaining = dt_s;
 
+        const SpacecraftId spacecraft_id = sc0.id;
         SpacecraftKinematics y{out.state.position_m, out.state.velocity_mps};
 
-        auto primary_for = [&](const BurnSegment &seg, const double t_s, const Vec3 &pos_m) -> std::size_t {
-            if (seg.primary_index < bodies.size())
+        auto body_index_for_id = [&](const BodyId id, std::size_t *out_index) -> bool {
+            if (out_index == nullptr)
             {
-                return seg.primary_index;
+                return false;
+            }
+            *out_index = 0;
+            if (id == kInvalidBodyId)
+            {
+                return false;
+            }
+            for (std::size_t i = 0; i < bodies.size(); ++i)
+            {
+                if (bodies[i].id == id)
+                {
+                    *out_index = i;
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        auto primary_for = [&](const BurnSegment &seg, const double t_s, const Vec3 &pos_m) -> std::size_t {
+            std::size_t primary_index = 0;
+            if (body_index_for_id(seg.primary_body_id, &primary_index))
+            {
+                return primary_index;
             }
             if (bodies.empty())
             {
@@ -122,14 +142,14 @@ namespace orbitsim::detail
 
         while (remaining > 0.0)
         {
-            const double boundary = next_burn_boundary_after(plan, spacecraft_index, t, t_end_s);
+            const double boundary = next_burn_boundary_after(plan, spacecraft_id, t, t_end_s);
             double h = std::min(remaining, boundary - t);
             if (!(h > 0.0) || !std::isfinite(h))
             {
                 break;
             }
 
-            const BurnSegment *seg = active_burn_at(plan, spacecraft_index, t);
+            const BurnSegment *seg = active_burn_at(plan, spacecraft_id, t);
             const bool has_engine = (seg != nullptr) && (seg->engine_index < out.engines.size());
             const Engine engine = has_engine ? out.engines[seg->engine_index] : Engine{};
 
@@ -187,9 +207,7 @@ namespace orbitsim::detail
                 return a;
             };
 
-            DOPRI5Stats stats{};
-            y = dopri5_integrate_interval(t, y, h, accel, spacecraft_integrator, &stats);
-            (void) stats;
+            y = dopri5_integrate_interval(t, y, h, accel, spacecraft_integrator);
 
             if (mdot_kgps > 0.0)
             {
@@ -208,4 +226,3 @@ namespace orbitsim::detail
     }
 
 } // namespace orbitsim::detail
-

@@ -59,7 +59,7 @@ TEST(GameSimulation, TargetedBurnOnlyAffectsOneSpacecraft)
 
     orbitsim::GameSimulation sim(cfg);
 
-    sim.massive_bodies().push_back(orbitsim::MassiveBody{
+    const orbitsim::GameSimulation::BodyHandle body_h = sim.create_body(orbitsim::MassiveBody{
             .mass_kg = 0.0,
             .radius_m = 1.0,
             .state =
@@ -68,6 +68,7 @@ TEST(GameSimulation, TargetedBurnOnlyAffectsOneSpacecraft)
                             .velocity_mps = {0.0, 0.0, 0.0},
                     },
     });
+    ASSERT_TRUE(body_h.valid());
 
     orbitsim::Spacecraft sc{};
     sc.state.position_m = {3.0, 0.0, 0.0};
@@ -75,29 +76,33 @@ TEST(GameSimulation, TargetedBurnOnlyAffectsOneSpacecraft)
     sc.dry_mass_kg = 1.0;
     sc.prop_mass_kg = 0.1;
     sc.engines.push_back(orbitsim::Engine{.max_thrust_N = 10.0, .isp_s = 1.0, .min_throttle_0_1 = 0.0});
-    sim.spacecraft().push_back(sc);
-    sim.spacecraft().push_back(sc);
+    const orbitsim::GameSimulation::SpacecraftHandle sc0_h = sim.create_spacecraft(sc);
+    const orbitsim::GameSimulation::SpacecraftHandle sc1_h = sim.create_spacecraft(sc);
+    ASSERT_TRUE(sc0_h.valid());
+    ASSERT_TRUE(sc1_h.valid());
 
     sim.maneuver_plan().segments.push_back(orbitsim::BurnSegment{
             .t_start_s = 0.0,
             .t_end_s = 10.0,
-            .primary_index = 0,
+            .primary_body_id = body_h,
             .dir_rtn_unit = {1.0, 0.0, 0.0},
             .throttle_0_1 = 1.0,
             .engine_index = 0,
-            .spacecraft_index = 1,
+            .spacecraft_id = sc1_h,
     });
 
     sim.step(1.0);
 
-    const orbitsim::Spacecraft &out0 = sim.spacecraft()[0];
-    const orbitsim::Spacecraft &out1 = sim.spacecraft()[1];
-    EXPECT_TRUE(near_abs(out0.prop_mass_kg, 0.1, 1e-12));
-    EXPECT_TRUE(near_abs(out0.state.velocity_mps.x, 0.0, 1e-12));
-    EXPECT_GE(out1.prop_mass_kg, 0.0);
-    EXPECT_TRUE(near_abs(out1.prop_mass_kg, 0.0, 1e-12));
-    EXPECT_TRUE(std::isfinite(out1.state.velocity_mps.x));
-    EXPECT_GT(out1.state.velocity_mps.x, 0.0);
+    const orbitsim::Spacecraft *out0 = sim.spacecraft_by_id(sc0_h.id);
+    const orbitsim::Spacecraft *out1 = sim.spacecraft_by_id(sc1_h.id);
+    ASSERT_NE(out0, nullptr);
+    ASSERT_NE(out1, nullptr);
+    EXPECT_TRUE(near_abs(out0->prop_mass_kg, 0.1, 1e-12));
+    EXPECT_TRUE(near_abs(out0->state.velocity_mps.x, 0.0, 1e-12));
+    EXPECT_GE(out1->prop_mass_kg, 0.0);
+    EXPECT_TRUE(near_abs(out1->prop_mass_kg, 0.0, 1e-12));
+    EXPECT_TRUE(std::isfinite(out1->state.velocity_mps.x));
+    EXPECT_GT(out1->state.velocity_mps.x, 0.0);
 
     std::cout << "====== Test completed ======" << std::endl;
 }
@@ -112,7 +117,7 @@ TEST(Trajectories, PredictSpacecraftTrajectoryLinearMotion)
 
     orbitsim::GameSimulation sim(cfg);
 
-    sim.massive_bodies().push_back(orbitsim::MassiveBody{
+    const orbitsim::GameSimulation::BodyHandle origin_h = sim.create_body(orbitsim::MassiveBody{
             .mass_kg = 0.0,
             .radius_m = 1.0,
             .state =
@@ -121,13 +126,15 @@ TEST(Trajectories, PredictSpacecraftTrajectoryLinearMotion)
                             .velocity_mps = {0.5, 0.0, 0.0},
                     },
     });
+    ASSERT_TRUE(origin_h.valid());
 
     orbitsim::Spacecraft sc{};
     sc.state.position_m = {110.0, 0.0, 0.0};
     sc.state.velocity_mps = {1.0, 0.0, 0.0};
     sc.dry_mass_kg = 1.0;
     sc.prop_mass_kg = 0.0;
-    sim.spacecraft().push_back(sc);
+    const orbitsim::GameSimulation::SpacecraftHandle sc_h = sim.create_spacecraft(sc);
+    ASSERT_TRUE(sc_h.valid());
 
     orbitsim::TrajectoryOptions opt{};
     opt.duration_s = 10.0;
@@ -135,9 +142,9 @@ TEST(Trajectories, PredictSpacecraftTrajectoryLinearMotion)
     opt.max_samples = 64;
     opt.include_start = true;
     opt.include_end = true;
-    opt.origin_body_index = 0;
+    opt.origin_body_id = origin_h;
 
-    const std::vector<orbitsim::TrajectorySample> traj = orbitsim::predict_spacecraft_trajectory(sim, 0, opt);
+    const std::vector<orbitsim::TrajectorySample> traj = orbitsim::predict_spacecraft_trajectory(sim, sc_h, opt);
     ASSERT_EQ(traj.size(), 11u);
 
     // Relative position should drift at (v_sc - v_body) = 0.5 m/s, starting from 10m.
@@ -158,7 +165,7 @@ TEST(Trajectories, CelestialEphemerisLinearInterpolationAndClamp)
 
     orbitsim::GameSimulation sim(cfg);
 
-    sim.massive_bodies().push_back(orbitsim::MassiveBody{
+    const orbitsim::GameSimulation::BodyHandle moving_h = sim.create_body(orbitsim::MassiveBody{
             .mass_kg = 1.0,
             .radius_m = 1.0,
             .state =
@@ -167,6 +174,7 @@ TEST(Trajectories, CelestialEphemerisLinearInterpolationAndClamp)
                             .velocity_mps = {1.0, 0.0, 0.0},
                     },
     });
+    ASSERT_TRUE(moving_h.valid());
 
     orbitsim::TrajectoryOptions opt{};
     opt.duration_s = 4.0;
@@ -178,19 +186,19 @@ TEST(Trajectories, CelestialEphemerisLinearInterpolationAndClamp)
     ASSERT_FALSE(eph.empty());
     ASSERT_EQ(eph.segments.size(), 2u);
 
-    const orbitsim::State s_t1 = eph.body_state_at(0, 1.0);
+    const orbitsim::State s_t1 = eph.body_state_at_by_id(moving_h, 1.0);
     EXPECT_TRUE(near_vec_abs(s_t1.position_m, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-12));
     EXPECT_TRUE(near_vec_abs(s_t1.velocity_mps, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-12));
 
-    const orbitsim::State s_t3 = eph.body_state_at(0, 3.0);
+    const orbitsim::State s_t3 = eph.body_state_at_by_id(moving_h, 3.0);
     EXPECT_TRUE(near_vec_abs(s_t3.position_m, orbitsim::Vec3{3.0, 0.0, 0.0}, 1e-12));
     EXPECT_TRUE(near_vec_abs(s_t3.velocity_mps, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-12));
 
-    const orbitsim::State s_before = eph.body_state_at(0, -1.0);
+    const orbitsim::State s_before = eph.body_state_at_by_id(moving_h, -1.0);
     EXPECT_TRUE(near_vec_abs(s_before.position_m, orbitsim::Vec3{0.0, 0.0, 0.0}, 1e-12));
     EXPECT_TRUE(near_vec_abs(s_before.velocity_mps, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-12));
 
-    const orbitsim::State s_after = eph.body_state_at(0, 10.0);
+    const orbitsim::State s_after = eph.body_state_at_by_id(moving_h, 10.0);
     EXPECT_TRUE(near_vec_abs(s_after.position_m, orbitsim::Vec3{4.0, 0.0, 0.0}, 1e-12));
     EXPECT_TRUE(near_vec_abs(s_after.velocity_mps, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-12));
 }
@@ -203,7 +211,7 @@ TEST(Trajectories, BodyTrajectoryRelativeToSelfIsZero)
 
     orbitsim::GameSimulation sim(cfg);
 
-    sim.massive_bodies().push_back(orbitsim::MassiveBody{
+    const orbitsim::GameSimulation::BodyHandle self_h = sim.create_body(orbitsim::MassiveBody{
             .mass_kg = 1.0,
             .radius_m = 1.0,
             .state =
@@ -212,16 +220,17 @@ TEST(Trajectories, BodyTrajectoryRelativeToSelfIsZero)
                             .velocity_mps = {2.0, 0.0, 0.0},
                     },
     });
+    ASSERT_TRUE(self_h.valid());
 
     orbitsim::TrajectoryOptions opt{};
     opt.duration_s = 5.0;
     opt.sample_dt_s = 1.0;
     opt.celestial_dt_s = 1.0;
     opt.max_samples = 64;
-    opt.origin_body_index = 0;
+    opt.origin_body_id = self_h;
 
     const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris(sim, opt);
-    const std::vector<orbitsim::TrajectorySample> traj = orbitsim::predict_body_trajectory(sim, eph, 0, opt);
+    const std::vector<orbitsim::TrajectorySample> traj = orbitsim::predict_body_trajectory(sim, eph, self_h, opt);
     ASSERT_EQ(traj.size(), 6u);
     for (const auto &s: traj)
     {

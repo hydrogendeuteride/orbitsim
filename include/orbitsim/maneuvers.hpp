@@ -12,17 +12,28 @@
 namespace orbitsim
 {
 
-    inline constexpr std::size_t kAllSpacecraft = std::numeric_limits<std::size_t>::max();
+    inline constexpr SpacecraftId kAllSpacecraft = std::numeric_limits<SpacecraftId>::max();
+
+    // -------------------------------------------------------------------------
+    // RTN direction constants for common burn orientations
+    // -------------------------------------------------------------------------
+
+    inline constexpr Vec3 kPrograde{0.0, 1.0, 0.0};   // +T: along velocity
+    inline constexpr Vec3 kRetrograde{0.0, -1.0, 0.0}; // -T: against velocity
+    inline constexpr Vec3 kRadialOut{1.0, 0.0, 0.0};  // +R: away from primary
+    inline constexpr Vec3 kRadialIn{-1.0, 0.0, 0.0};  // -R: toward primary
+    inline constexpr Vec3 kNormal{0.0, 0.0, 1.0};     // +N: normal to orbital plane
+    inline constexpr Vec3 kAntiNormal{0.0, 0.0, -1.0}; // -N: opposite normal
 
     struct BurnSegment
     {
         double t_start_s{0.0};
         double t_end_s{0.0};
-        std::size_t primary_index{0};
+        BodyId primary_body_id{kInvalidBodyId}; // Burn RTN frame primary; invalid = auto-select.
         Vec3 dir_rtn_unit{0.0, 0.0, 0.0}; // Components in (R, T, N).
         double throttle_0_1{0.0};
         std::size_t engine_index{0};
-        std::size_t spacecraft_index{kAllSpacecraft}; // Which spacecraft this burn targets; kAllSpacecraft = all.
+        SpacecraftId spacecraft_id{kAllSpacecraft}; // Which spacecraft this burn targets; kAllSpacecraft = all.
     };
 
     struct ManeuverPlan
@@ -30,9 +41,9 @@ namespace orbitsim
         std::vector<BurnSegment> segments{};
     };
 
-    inline bool segment_applies_to_spacecraft(const BurnSegment &seg, const std::size_t spacecraft_index)
+    inline bool segment_applies_to_spacecraft(const BurnSegment &seg, const SpacecraftId spacecraft_id)
     {
-        return seg.spacecraft_index == kAllSpacecraft || seg.spacecraft_index == spacecraft_index;
+        return seg.spacecraft_id == kAllSpacecraft || seg.spacecraft_id == spacecraft_id;
     }
 
     inline void sort_segments_by_start(ManeuverPlan &plan)
@@ -84,28 +95,18 @@ namespace orbitsim
         }
     } // namespace detail
 
-    inline const BurnSegment *active_burn_at(const ManeuverPlan &plan, const double t_s)
-    {
-        return detail::active_burn_at_if_(plan, t_s, [](const BurnSegment &) { return true; });
-    }
-
-    inline const BurnSegment *active_burn_at(const ManeuverPlan &plan, const std::size_t spacecraft_index, const double t_s)
+    inline const BurnSegment *active_burn_at(const ManeuverPlan &plan, const SpacecraftId spacecraft_id, const double t_s)
     {
         return detail::active_burn_at_if_(plan, t_s, [&](const BurnSegment &seg) {
-            return segment_applies_to_spacecraft(seg, spacecraft_index);
+            return segment_applies_to_spacecraft(seg, spacecraft_id);
         });
     }
 
-    inline double next_burn_boundary_after(const ManeuverPlan &plan, const double t_s, const double t_end_s)
-    {
-        return detail::next_burn_boundary_after_if_(plan, t_s, t_end_s, [](const BurnSegment &) { return true; });
-    }
-
-    inline double next_burn_boundary_after(const ManeuverPlan &plan, const std::size_t spacecraft_index, const double t_s,
+    inline double next_burn_boundary_after(const ManeuverPlan &plan, const SpacecraftId spacecraft_id, const double t_s,
                                           const double t_end_s)
     {
         return detail::next_burn_boundary_after_if_(plan, t_s, t_end_s, [&](const BurnSegment &seg) {
-            return segment_applies_to_spacecraft(seg, spacecraft_index);
+            return segment_applies_to_spacecraft(seg, spacecraft_id);
         });
     }
 
@@ -138,6 +139,203 @@ namespace orbitsim
                                        const Vec3 &sc_pos_m, const Vec3 &sc_vel_mps, const Vec3 &dir_rtn_unit)
     {
         return detail::burn_dir_inertial_unit_(eph, primary_index, t_s, sc_pos_m, sc_vel_mps, dir_rtn_unit);
+    }
+
+    // -------------------------------------------------------------------------
+    // BurnBuilder: fluent interface for creating BurnSegment
+    // -------------------------------------------------------------------------
+
+    /// @brief Fluent builder for creating BurnSegment objects.
+    /// @example
+    ///   auto seg = burn().start(hours(2.0)).duration(minutes(20.0)).prograde().spacecraft(sc_id);
+    class BurnBuilder
+    {
+    public:
+        BurnBuilder() = default;
+
+        /// @brief Set burn start time [s].
+        BurnBuilder &start(const double t_start_s)
+        {
+            seg_.t_start_s = t_start_s;
+            return *this;
+        }
+
+        /// @brief Set burn end time [s].
+        BurnBuilder &end(const double t_end_s)
+        {
+            seg_.t_end_s = t_end_s;
+            return *this;
+        }
+
+        /// @brief Set burn duration [s]. Computes end time from start + duration.
+        BurnBuilder &duration(const double duration_s)
+        {
+            seg_.t_end_s = seg_.t_start_s + duration_s;
+            return *this;
+        }
+
+        /// @brief Set the RTN direction unit vector.
+        BurnBuilder &direction(const Vec3 &dir_rtn_unit)
+        {
+            seg_.dir_rtn_unit = dir_rtn_unit;
+            return *this;
+        }
+
+        /// @brief Set direction to prograde (+T).
+        BurnBuilder &prograde()
+        {
+            seg_.dir_rtn_unit = kPrograde;
+            return *this;
+        }
+
+        /// @brief Set direction to retrograde (-T).
+        BurnBuilder &retrograde()
+        {
+            seg_.dir_rtn_unit = kRetrograde;
+            return *this;
+        }
+
+        /// @brief Set direction to radial out (+R).
+        BurnBuilder &radial_out()
+        {
+            seg_.dir_rtn_unit = kRadialOut;
+            return *this;
+        }
+
+        /// @brief Set direction to radial in (-R).
+        BurnBuilder &radial_in()
+        {
+            seg_.dir_rtn_unit = kRadialIn;
+            return *this;
+        }
+
+        /// @brief Set direction to normal (+N).
+        BurnBuilder &normal()
+        {
+            seg_.dir_rtn_unit = kNormal;
+            return *this;
+        }
+
+        /// @brief Set direction to anti-normal (-N).
+        BurnBuilder &anti_normal()
+        {
+            seg_.dir_rtn_unit = kAntiNormal;
+            return *this;
+        }
+
+        /// @brief Set throttle level [0, 1].
+        BurnBuilder &throttle(const double throttle_0_1)
+        {
+            seg_.throttle_0_1 = throttle_0_1;
+            return *this;
+        }
+
+        /// @brief Set throttle to full (1.0).
+        BurnBuilder &full_throttle()
+        {
+            seg_.throttle_0_1 = 1.0;
+            return *this;
+        }
+
+        /// @brief Set the primary body for RTN frame computation.
+        BurnBuilder &primary(const BodyId primary_body_id)
+        {
+            seg_.primary_body_id = primary_body_id;
+            return *this;
+        }
+
+        /// @brief Set the target spacecraft.
+        BurnBuilder &spacecraft(const SpacecraftId spacecraft_id)
+        {
+            seg_.spacecraft_id = spacecraft_id;
+            return *this;
+        }
+
+        /// @brief Set the engine index.
+        BurnBuilder &engine(const std::size_t engine_index)
+        {
+            seg_.engine_index = engine_index;
+            return *this;
+        }
+
+        /// @brief Implicit conversion to BurnSegment.
+        operator BurnSegment() const { return seg_; }
+
+        /// @brief Explicit conversion to BurnSegment.
+        BurnSegment build() const { return seg_; }
+
+    private:
+        BurnSegment seg_{.throttle_0_1 = 1.0}; // Default full throttle.
+    };
+
+    /// @brief Start building a BurnSegment with the fluent interface.
+    inline BurnBuilder burn() { return BurnBuilder{}; }
+
+    // -------------------------------------------------------------------------
+    // Convenience factory functions for common burn types
+    // -------------------------------------------------------------------------
+
+    /// @brief Create a prograde burn (velocity-increasing).
+    /// @param t_start_s Start time [s].
+    /// @param duration_s Burn duration [s].
+    /// @param spacecraft_id Target spacecraft (default: all spacecraft).
+    /// @param primary_body_id Primary body for RTN frame (default: auto-select).
+    /// @param throttle_0_1 Throttle level [0, 1] (default: 1.0).
+    /// @param engine_index Engine index (default: 0).
+    inline BurnSegment prograde_burn(const double t_start_s, const double duration_s,
+                                     const SpacecraftId spacecraft_id = kAllSpacecraft,
+                                     const BodyId primary_body_id = kInvalidBodyId,
+                                     const double throttle_0_1 = 1.0, const std::size_t engine_index = 0)
+    {
+        return BurnSegment{.t_start_s = t_start_s,
+                           .t_end_s = t_start_s + duration_s,
+                           .primary_body_id = primary_body_id,
+                           .dir_rtn_unit = kPrograde,
+                           .throttle_0_1 = throttle_0_1,
+                           .engine_index = engine_index,
+                           .spacecraft_id = spacecraft_id};
+    }
+
+    /// @brief Create a retrograde burn (velocity-decreasing).
+    /// @param t_start_s Start time [s].
+    /// @param duration_s Burn duration [s].
+    /// @param spacecraft_id Target spacecraft (default: all spacecraft).
+    /// @param primary_body_id Primary body for RTN frame (default: auto-select).
+    /// @param throttle_0_1 Throttle level [0, 1] (default: 1.0).
+    /// @param engine_index Engine index (default: 0).
+    inline BurnSegment retrograde_burn(const double t_start_s, const double duration_s,
+                                       const SpacecraftId spacecraft_id = kAllSpacecraft,
+                                       const BodyId primary_body_id = kInvalidBodyId,
+                                       const double throttle_0_1 = 1.0, const std::size_t engine_index = 0)
+    {
+        return BurnSegment{.t_start_s = t_start_s,
+                           .t_end_s = t_start_s + duration_s,
+                           .primary_body_id = primary_body_id,
+                           .dir_rtn_unit = kRetrograde,
+                           .throttle_0_1 = throttle_0_1,
+                           .engine_index = engine_index,
+                           .spacecraft_id = spacecraft_id};
+    }
+
+    /// @brief Create a normal burn (plane change, +N direction).
+    /// @param t_start_s Start time [s].
+    /// @param duration_s Burn duration [s].
+    /// @param spacecraft_id Target spacecraft (default: all spacecraft).
+    /// @param primary_body_id Primary body for RTN frame (default: auto-select).
+    /// @param throttle_0_1 Throttle level [0, 1] (default: 1.0).
+    /// @param engine_index Engine index (default: 0).
+    inline BurnSegment normal_burn(const double t_start_s, const double duration_s,
+                                   const SpacecraftId spacecraft_id = kAllSpacecraft,
+                                   const BodyId primary_body_id = kInvalidBodyId, const double throttle_0_1 = 1.0,
+                                   const std::size_t engine_index = 0)
+    {
+        return BurnSegment{.t_start_s = t_start_s,
+                           .t_end_s = t_start_s + duration_s,
+                           .primary_body_id = primary_body_id,
+                           .dir_rtn_unit = kNormal,
+                           .throttle_0_1 = throttle_0_1,
+                           .engine_index = engine_index,
+                           .spacecraft_id = spacecraft_id};
     }
 
 } // namespace orbitsim

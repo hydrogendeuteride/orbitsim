@@ -50,32 +50,35 @@ namespace orbitsim
         }
     }
 
-    inline void velocity_verlet_step(std::vector<MassiveBody> &bodies, const double dt_s, const double G,
-                                     const double softening_length_m)
+    namespace detail
     {
-        std::vector<Vec3> acc;
-        compute_nbody_accelerations(bodies, G, softening_length_m, acc);
+        inline void velocity_verlet_step(std::vector<MassiveBody> &bodies, const double dt_s, const double G,
+                                         const double softening_length_m)
+        {
+            std::vector<Vec3> acc;
+            compute_nbody_accelerations(bodies, G, softening_length_m, acc);
 
-        for (std::size_t i = 0; i < bodies.size(); ++i)
-        {
-            bodies[i].state.velocity_mps += 0.5 * dt_s * acc[i];
-        }
-        for (auto &b: bodies)
-        {
-            b.state.position_m += dt_s * b.state.velocity_mps;
-        }
+            for (std::size_t i = 0; i < bodies.size(); ++i)
+            {
+                bodies[i].state.velocity_mps += 0.5 * dt_s * acc[i];
+            }
+            for (auto &b: bodies)
+            {
+                b.state.position_m += dt_s * b.state.velocity_mps;
+            }
 
-        compute_nbody_accelerations(bodies, G, softening_length_m, acc);
-        for (std::size_t i = 0; i < bodies.size(); ++i)
-        {
-            bodies[i].state.velocity_mps += 0.5 * dt_s * acc[i];
-        }
+            compute_nbody_accelerations(bodies, G, softening_length_m, acc);
+            for (std::size_t i = 0; i < bodies.size(); ++i)
+            {
+                bodies[i].state.velocity_mps += 0.5 * dt_s * acc[i];
+            }
 
-        for (auto &b: bodies)
-        {
-            advance_spin(b.state.spin, dt_s);
+            for (auto &b: bodies)
+            {
+                advance_spin(b.state.spin, dt_s);
+            }
         }
-    }
+    } // namespace detail
 
     inline void symplectic4_step(std::vector<MassiveBody> &bodies, const double dt_s, const double G,
                                  const double softening_length_m)
@@ -86,9 +89,9 @@ namespace orbitsim
         const double w1 = 1.0 / (2.0 - cbrt2);
         const double w0 = -cbrt2 * w1;
 
-        velocity_verlet_step(bodies, w1 * dt_s, G, softening_length_m);
-        velocity_verlet_step(bodies, w0 * dt_s, G, softening_length_m);
-        velocity_verlet_step(bodies, w1 * dt_s, G, softening_length_m);
+        detail::velocity_verlet_step(bodies, w1 * dt_s, G, softening_length_m);
+        detail::velocity_verlet_step(bodies, w0 * dt_s, G, softening_length_m);
+        detail::velocity_verlet_step(bodies, w1 * dt_s, G, softening_length_m);
     }
 
     struct DOPRI5Options
@@ -97,13 +100,11 @@ namespace orbitsim
         double abs_tol{1e-3}; // meters or (m/s) depending on component (scaled internally)
         double rel_tol{1e-9};
         int max_substeps{64};
+        // If > 0, clamps the internal step size |h| (helps prevent "big jumps" over long coast intervals).
+        // Note: if max_step_s is too small relative to (dt_s / max_substeps), the integrator will fall back
+        // to a final single step to finish the interval.
+        double max_step_s{0.0};
         double min_step_s{1e-6};
-    };
-
-    struct DOPRI5Stats
-    {
-        int accepted_steps{0};
-        int rejected_steps{0};
     };
 
     struct SpacecraftKinematics
@@ -141,7 +142,7 @@ namespace orbitsim
     inline SpacecraftKinematics dopri5_single_step(
             const double t_s, const SpacecraftKinematics &y, const double h_s,
             const std::function<Vec3(double /*t_s*/, const Vec3 & /*pos_m*/, const Vec3 & /*vel_mps*/)> &accel_mps2,
-            SpacecraftKinematics *out_err, SpacecraftKinematics *out_y4)
+            SpacecraftKinematics *out_err)
     {
         // Dormand–Prince 5(4) tableau (ode45).
         auto f = [&](double t, const SpacecraftKinematics &s) {
@@ -208,10 +209,6 @@ namespace orbitsim
                                         (187.0 / 2100.0) * k6.velocity_mps + (1.0 / 40.0) * k7.velocity_mps),
         };
 
-        if (out_y4 != nullptr)
-        {
-            *out_y4 = y4;
-        }
         if (out_err != nullptr)
         {
             out_err->position_m = y5.position_m - y4.position_m;
@@ -223,12 +220,8 @@ namespace orbitsim
     inline SpacecraftKinematics dopri5_integrate_interval(
             const double t0_s, const SpacecraftKinematics &y0, const double dt_s,
             const std::function<Vec3(double /*t_s*/, const Vec3 & /*pos_m*/, const Vec3 & /*vel_mps*/)> &accel_mps2,
-            const DOPRI5Options &opt, DOPRI5Stats *out_stats)
+            const DOPRI5Options &opt)
     {
-        if (out_stats != nullptr)
-        {
-            *out_stats = {};
-        }
         if (!(dt_s != 0.0) || !std::isfinite(dt_s))
         {
             return y0;
@@ -239,17 +232,31 @@ namespace orbitsim
         double t = t0_s;
         SpacecraftKinematics y = y0;
 
+        const double eff_max_step_s =
+                (opt.max_step_s > 0.0) ? std::max(opt.max_step_s, opt.min_step_s) : 0.0;
+        const auto clamp_h = [&](double h_s) -> double {
+            if (!(eff_max_step_s > 0.0))
+            {
+                return h_s;
+            }
+            if (std::abs(h_s) > eff_max_step_s)
+            {
+                return eff_max_step_s * ((h_s >= 0.0) ? 1.0 : -1.0);
+            }
+            return h_s;
+        };
+
         double h = dt_s;
         if (opt.adaptive)
         {
             const double abs_dt = std::abs(dt_s);
             if (abs_dt <= opt.min_step_s)
             {
-                // Interval is tiny; do a single step without substepping logic.
-                return dopri5_single_step(t0_s, y0, dt_s, accel_mps2, nullptr, nullptr);
+                return dopri5_single_step(t0_s, y0, dt_s, accel_mps2, nullptr);
             }
             h = abs_dt * dir;
         }
+        h = clamp_h(h);
 
         const double safety = 0.9;
         const double min_fac = 0.2;
@@ -260,39 +267,30 @@ namespace orbitsim
         {
             if (++substeps > std::max(1, opt.max_substeps))
             {
-                break;
+                return dopri5_single_step(t, y, t_end - t, accel_mps2, nullptr);
             }
             const double remaining = t_end - t;
             if (std::abs(h) > std::abs(remaining))
             {
                 h = remaining;
             }
+            h = clamp_h(h);
 
             SpacecraftKinematics err{};
-            SpacecraftKinematics y4{};
-            const SpacecraftKinematics y_next = dopri5_single_step(t, y, h, accel_mps2, &err, &y4);
+            const SpacecraftKinematics y_next = dopri5_single_step(t, y, h, accel_mps2, &err);
 
             if (!opt.adaptive)
             {
                 y = y_next;
                 t += h;
-                if (out_stats != nullptr)
-                {
-                    out_stats->accepted_steps += 1;
-                }
                 continue;
             }
 
             const double err_norm = dopri5_error_norm(y, y_next, err, opt.abs_tol, opt.rel_tol);
             if (!(err_norm >= 0.0) || !std::isfinite(err_norm))
             {
-                // Give up on adaptivity for this interval.
                 y = y_next;
                 t += h;
-                if (out_stats != nullptr)
-                {
-                    out_stats->accepted_steps += 1;
-                }
                 continue;
             }
 
@@ -300,22 +298,16 @@ namespace orbitsim
             {
                 y = y_next;
                 t += h;
-                if (out_stats != nullptr)
-                {
-                    out_stats->accepted_steps += 1;
-                }
                 const double fac =
                         (err_norm == 0.0) ? max_fac : std::clamp(safety * std::pow(err_norm, -0.2), min_fac, max_fac);
                 h *= fac;
+                h = clamp_h(h);
             }
             else
             {
-                if (out_stats != nullptr)
-                {
-                    out_stats->rejected_steps += 1;
-                }
                 const double fac = std::clamp(safety * std::pow(err_norm, -0.2), min_fac, 1.0);
                 h *= fac;
+                h = clamp_h(h);
                 if (std::abs(h) < opt.min_step_s)
                 {
                     h = opt.min_step_s * dir;
