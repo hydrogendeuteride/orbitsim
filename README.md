@@ -6,6 +6,7 @@ Small header-only orbit simulation library intended for games:
 - Restricted full N-body simulation:
   - Massive bodies (planets/moons): symplectic 4th order (Yoshida composition)
   - Massless spacecraft: DOPRI5(4) with interpolation of massive body states
+- Trajectory sampling helpers (future prediction) for orbit-line rendering
 
 Assumptions / conventions:
 

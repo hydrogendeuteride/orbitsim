@@ -3,7 +3,9 @@
 #include "orbitsim/math.hpp"
 #include "orbitsim/types.hpp"
 
+#include <algorithm>
 #include <cstddef>
+#include <iterator>
 #include <vector>
 
 namespace orbitsim
@@ -28,7 +30,8 @@ namespace orbitsim
                 return start[body_index];
             }
 
-            const double tau = (t_s - t0_s) / dt_s;
+            const double tau = clamp01((t_s - t0_s) / dt_s);
+            const double t_eval_s = t0_s + tau * dt_s;
             const State &s0 = start[body_index];
             const State &s1 = end[body_index];
 
@@ -39,8 +42,70 @@ namespace orbitsim
 
             out.spin.axis = normalized_or(s0.spin.axis, Vec3{0.0, 1.0, 0.0});
             out.spin.rate_rad_per_s = s0.spin.rate_rad_per_s;
-            out.spin.angle_rad = s0.spin.angle_rad + s0.spin.rate_rad_per_s * (t_s - t0_s);
+            out.spin.angle_rad = s0.spin.angle_rad + s0.spin.rate_rad_per_s * (t_eval_s - t0_s);
             return out;
+        }
+
+        inline Vec3 body_position_at(const std::size_t body_index, const double t_s) const
+        {
+            return body_state_at(body_index, t_s).position_m;
+        }
+
+        inline Vec3 body_velocity_at(const std::size_t body_index, const double t_s) const
+        {
+            return body_state_at(body_index, t_s).velocity_mps;
+        }
+    };
+
+    class CelestialEphemeris
+    {
+    public:
+        std::vector<CelestialEphemerisSegment> segments{};
+
+        inline bool empty() const { return segments.empty(); }
+
+        inline double t0_s() const
+        {
+            if (segments.empty())
+            {
+                return 0.0;
+            }
+            return segments.front().t0_s;
+        }
+
+        inline double t_end_s() const
+        {
+            if (segments.empty())
+            {
+                return 0.0;
+            }
+            const auto &last = segments.back();
+            return last.t0_s + last.dt_s;
+        }
+
+        inline State body_state_at(const std::size_t body_index, const double t_s) const
+        {
+            State out{};
+            if (segments.empty())
+            {
+                return out;
+            }
+
+            const auto it = std::upper_bound(
+                    segments.begin(),
+                    segments.end(),
+                    t_s,
+                    [](const double t, const CelestialEphemerisSegment &seg) { return t < seg.t0_s; });
+
+            if (it == segments.begin())
+            {
+                return segments.front().body_state_at(body_index, t_s);
+            }
+            if (it == segments.end())
+            {
+                return segments.back().body_state_at(body_index, t_s);
+            }
+            return std::prev(it)->body_state_at(body_index, t_s);
         }
 
         inline Vec3 body_position_at(const std::size_t body_index, const double t_s) const

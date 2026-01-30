@@ -10,3 +10,4 @@
 #include "orbitsim/events.hpp"
 #include "orbitsim/game_sim.hpp"
 #include "orbitsim/maneuvers.hpp"
+#include "orbitsim/trajectories.hpp"

@@ -31,6 +31,7 @@ namespace orbitsim
         explicit GameSimulation(Config cfg) : cfg_(std::move(cfg)) {}
 
         double time_s() const { return time_s_; }
+        const Config &config() const { return cfg_; }
 
         std::vector<MassiveBody> &massive_bodies() { return massive_; }
         const std::vector<MassiveBody> &massive_bodies() const { return massive_; }
@@ -103,14 +104,15 @@ namespace orbitsim
                 preview_step_no_events_(massive_preview, spacecraft_preview, t_preview, remaining, &eph_preview);
 
                 std::optional<Event> best;
-                for (const auto &sc: spacecraft_)
+                for (std::size_t sc_index = 0; sc_index < spacecraft_.size(); ++sc_index)
                 {
+                    const auto &sc = spacecraft_[sc_index];
                     auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
                                             const double dt_sc_s) -> Spacecraft {
-                        return propagate_spacecraft_(sc_start, eph_preview, t0_s, dt_sc_s);
+                        return propagate_spacecraft_(sc_start, eph_preview, t0_s, dt_sc_s, sc_index);
                     };
                     const std::optional<Event> e = find_earliest_event_in_interval(
-                            massive_, eph_preview, sc, time_s_, remaining, plan_, cfg_.events, propagate_sc);
+                            massive_, eph_preview, sc, time_s_, remaining, plan_, cfg_.events, propagate_sc, sc_index);
                     if (e.has_value() && (!best.has_value() || e->t_event_s < best->t_event_s))
                     {
                         best = e;
@@ -119,7 +121,16 @@ namespace orbitsim
 
                 if (!best.has_value())
                 {
-                    do_step_no_events_(remaining);
+                    // No events found: apply preview result for massive bodies to avoid recomputation,
+                    // but still need to propagate spacecraft since preview_step_no_events_ skips them.
+                    massive_ = std::move(massive_preview);
+
+                    for (std::size_t sc_index = 0; sc_index < spacecraft_.size(); ++sc_index)
+                    {
+                        spacecraft_[sc_index] = propagate_spacecraft_(spacecraft_[sc_index], eph_preview, time_s_, remaining, sc_index);
+                    }
+
+                    time_s_ = t_preview;
                     return;
                 }
 
@@ -191,7 +202,8 @@ namespace orbitsim
         }
 
         inline Spacecraft propagate_spacecraft_(const Spacecraft &sc0, const CelestialEphemerisSegment &eph,
-                                                const double t0_s, const double dt_s) const
+                                                const double t0_s, const double dt_s,
+                                                const std::size_t spacecraft_index) const
         {
             Spacecraft out = sc0;
             if (!(dt_s != 0.0) || !std::isfinite(dt_s))
@@ -222,27 +234,47 @@ namespace orbitsim
 
             SpacecraftKinematics y{out.state.position_m, out.state.velocity_mps};
 
-            auto primary_for = [&](const BurnSegment &seg, const std::size_t sc_index_guess) -> std::size_t {
+            auto primary_for = [&](const BurnSegment &seg, const double t_s, const Vec3 &pos_m) -> std::size_t {
                 if (seg.primary_index < massive_.size())
                 {
                     return seg.primary_index;
                 }
-                return select_primary_by_max_accel(sc_index_guess);
-            };
+                if (massive_.empty())
+                {
+                    return 0;
+                }
 
-            // Best-effort index for auto-primary selection (only used when segment primary is invalid).
-            std::size_t sc_index_guess = 0;
+                const double eps2 = cfg_.softening_length_m * cfg_.softening_length_m;
+                std::size_t best = 0;
+                double best_a = -1.0;
+                for (std::size_t i = 0; i < massive_.size(); ++i)
+                {
+                    const Vec3 dr = eph.body_position_at(i, t_s) - pos_m;
+                    const double r2 = glm::dot(dr, dr) + eps2;
+                    if (!(r2 > 0.0) || !std::isfinite(r2))
+                    {
+                        continue;
+                    }
+                    const double amag = (cfg_.gravitational_constant * massive_[i].mass_kg) / r2;
+                    if (amag > best_a)
+                    {
+                        best_a = amag;
+                        best = i;
+                    }
+                }
+                return best;
+            };
 
             while (remaining > 0.0)
             {
-                const double boundary = next_burn_boundary_after(plan_, t, t_end_s);
+                const double boundary = next_burn_boundary_after(plan_, spacecraft_index, t, t_end_s);
                 double h = std::min(remaining, boundary - t);
                 if (!(h > 0.0) || !std::isfinite(h))
                 {
                     break;
                 }
 
-                const BurnSegment *seg = active_burn_at(plan_, t);
+                const BurnSegment *seg = active_burn_at(plan_, spacecraft_index, t);
                 const bool has_engine = (seg != nullptr) && (seg->engine_index < out.engines.size());
                 const Engine engine = has_engine ? out.engines[seg->engine_index] : Engine{};
 
@@ -266,7 +298,7 @@ namespace orbitsim
 
                 const double t_segment_start = t;
                 const double prop_start_kg = out.prop_mass_kg;
-                const std::size_t primary = (seg != nullptr) ? primary_for(*seg, sc_index_guess) : 0;
+                const std::size_t primary = (seg != nullptr) ? primary_for(*seg, t, y.position_m) : 0;
                 const Vec3 dir_rtn = (seg != nullptr) ? seg->dir_rtn_unit : Vec3{0.0, 0.0, 0.0};
 
                 auto accel = [&](double t_eval_s, const Vec3 &pos_m, const Vec3 &vel_mps) -> Vec3 {
@@ -369,9 +401,9 @@ namespace orbitsim
 
             const CelestialEphemerisSegment eph = make_segment_(start_states, end_states, time_s_, dt_s);
 
-            for (auto &sc: spacecraft_)
+            for (std::size_t sc_index = 0; sc_index < spacecraft_.size(); ++sc_index)
             {
-                sc = propagate_spacecraft_(sc, eph, time_s_, dt_s);
+                spacecraft_[sc_index] = propagate_spacecraft_(spacecraft_[sc_index], eph, time_s_, dt_s, sc_index);
             }
 
             time_s_ += dt_s;

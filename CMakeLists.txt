@@ -14,7 +14,31 @@ target_compile_features(orbitsim INTERFACE cxx_std_20)
 add_executable(orbitsim_example main.cpp)
 target_link_libraries(orbitsim_example PRIVATE orbitsim)
 
-enable_testing()
-add_executable(orbitsim_tests tests/orbitsim_test.cpp)
-target_link_libraries(orbitsim_tests PRIVATE orbitsim)
-add_test(NAME orbitsim_tests COMMAND orbitsim_tests)
+option(ORBITSIM_ENABLE_GTEST "Build GoogleTest-based tests (in addition to assert-based tests)" OFF)
+
+if (ORBITSIM_ENABLE_GTEST)
+    include(FetchContent)
+
+    # Prefer vendored googletest (no network).
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/googletest/CMakeLists.txt")
+        add_subdirectory(third_party/googletest)
+    else()
+        # Otherwise try system package, then FetchContent (requires network at configure time).
+        find_package(GTest CONFIG QUIET)
+        if (NOT GTest_FOUND)
+            FetchContent_Declare(
+                    googletest
+                    GIT_REPOSITORY https://github.com/google/googletest.git
+                    GIT_TAG v1.14.0
+            )
+            set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+            FetchContent_MakeAvailable(googletest)
+        endif ()
+    endif ()
+
+    add_executable(orbitsim_gtests tests/orbitsim_gtest.cpp)
+    target_link_libraries(orbitsim_gtests PRIVATE orbitsim GTest::gtest_main)
+
+    include(GoogleTest)
+    gtest_discover_tests(orbitsim_gtests)
+endif ()

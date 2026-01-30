@@ -6,10 +6,13 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 namespace orbitsim
 {
+
+    inline constexpr std::size_t kAllSpacecraft = std::numeric_limits<std::size_t>::max();
 
     struct BurnSegment
     {
@@ -19,12 +22,18 @@ namespace orbitsim
         Vec3 dir_rtn_unit{0.0, 0.0, 0.0}; // Components in (R, T, N).
         double throttle_0_1{0.0};
         std::size_t engine_index{0};
+        std::size_t spacecraft_index{kAllSpacecraft}; // Which spacecraft this burn targets; kAllSpacecraft = all.
     };
 
     struct ManeuverPlan
     {
         std::vector<BurnSegment> segments{};
     };
+
+    inline bool segment_applies_to_spacecraft(const BurnSegment &seg, const std::size_t spacecraft_index)
+    {
+        return seg.spacecraft_index == kAllSpacecraft || seg.spacecraft_index == spacecraft_index;
+    }
 
     inline void sort_segments_by_start(ManeuverPlan &plan)
     {
@@ -44,11 +53,49 @@ namespace orbitsim
         return nullptr;
     }
 
+    inline const BurnSegment *active_burn_at(const ManeuverPlan &plan, const std::size_t spacecraft_index, const double t_s)
+    {
+        for (const auto &seg: plan.segments)
+        {
+            if (!segment_applies_to_spacecraft(seg, spacecraft_index))
+            {
+                continue;
+            }
+            if (seg.t_start_s <= t_s && t_s < seg.t_end_s)
+            {
+                return &seg;
+            }
+        }
+        return nullptr;
+    }
+
     inline double next_burn_boundary_after(const ManeuverPlan &plan, const double t_s, const double t_end_s)
     {
         double bound = t_end_s;
         for (const auto &seg: plan.segments)
         {
+            if (seg.t_start_s > t_s && seg.t_start_s < bound)
+            {
+                bound = seg.t_start_s;
+            }
+            if (seg.t_end_s > t_s && seg.t_end_s < bound && seg.t_start_s <= t_s && t_s < seg.t_end_s)
+            {
+                bound = seg.t_end_s;
+            }
+        }
+        return bound;
+    }
+
+    inline double next_burn_boundary_after(const ManeuverPlan &plan, const std::size_t spacecraft_index, const double t_s,
+                                          const double t_end_s)
+    {
+        double bound = t_end_s;
+        for (const auto &seg: plan.segments)
+        {
+            if (!segment_applies_to_spacecraft(seg, spacecraft_index))
+            {
+                continue;
+            }
             if (seg.t_start_s > t_s && seg.t_start_s < bound)
             {
                 bound = seg.t_start_s;
