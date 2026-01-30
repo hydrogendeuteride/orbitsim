@@ -1,7 +1,5 @@
 #include <orbitsim/orbitsim.hpp>
 
-#include <glm/glm.hpp>
-
 #include <cmath>
 #include <cstdio>
 
