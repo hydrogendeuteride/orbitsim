@@ -77,10 +77,10 @@ int main()
                                 earth_ptr->state.velocity_mps + sc_orbit.velocity_mps,
                                 {0.0, 0.0, 1.0}, 0.0),
             .dry_mass_kg = 800.0,
-            .prop_mass_kg = 200.0,
+            .prop_mass_kg = 2000.0,
             .engines =
                     {
-                            {.max_thrust_N = 2'000.0, .isp_s = 300.0, .min_throttle_0_1 = 0.05},
+                            {.max_thrust_N = 5'000.0, .isp_s = 300.0, .min_throttle_0_1 = 0.05},
                     },
     };
     const GameSimulation::SpacecraftHandle sc_h = sim.create_spacecraft(std::move(sc));
@@ -93,7 +93,7 @@ int main()
     // Injection burn: prograde in RTN (Earth primary).
     sim.maneuver_plan().segments.push_back(
             burn().start(hours(2.0))
-                  .duration(minutes(20.0))
+                  .duration(minutes(18.0))
                   .prograde()
                   .primary(earth_id)
                   .spacecraft(sc_id));
