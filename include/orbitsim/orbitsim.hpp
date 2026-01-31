@@ -7,6 +7,7 @@
 
 #include "orbitsim/ephemeris.hpp"
 #include "orbitsim/events.hpp"
+#include "orbitsim/frames.hpp"
 #include "orbitsim/game_sim.hpp"
 #include "orbitsim/maneuvers.hpp"
 #include "orbitsim/orbit_utils.hpp"

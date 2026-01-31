@@ -211,5 +211,54 @@ int main()
                     s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
     }
 
+    // -------------------------------------------------------------------------
+    // Rotating frame (synodic frame) visualization
+    // -------------------------------------------------------------------------
+    std::printf("\n--- rotating frame (Earth-Moon synodic) ---\n");
+
+    // Build synodic frame at t=0
+    const std::optional<SynodicFrame> frame = make_synodic_frame(*earth_ptr, *moon_ptr);
+    if (frame.has_value())
+    {
+        std::printf("synodic_frame_t0\n");
+        std::printf("separation_m,%.6e\n", frame->separation_m);
+        std::printf("mu,%.6e\n", frame->mu);
+        std::printf("omega_radps,%.6e,%.6e,%.6e\n",
+                    frame->omega_inertial_radps.x,
+                    frame->omega_inertial_radps.y,
+                    frame->omega_inertial_radps.z);
+
+        // Compute Lagrange points
+        const std::optional<Cr3bpLagrangePoints> lpts = cr3bp_lagrange_points_m(*frame);
+        if (lpts.has_value())
+        {
+            std::printf("lagrange_points\n");
+            std::printf("primary,%.6e,%.6e,%.6e\n", lpts->primary_m.x, lpts->primary_m.y, lpts->primary_m.z);
+            std::printf("secondary,%.6e,%.6e,%.6e\n", lpts->secondary_m.x, lpts->secondary_m.y, lpts->secondary_m.z);
+            std::printf("L1,%.6e,%.6e,%.6e\n", lpts->L1_m.x, lpts->L1_m.y, lpts->L1_m.z);
+            std::printf("L2,%.6e,%.6e,%.6e\n", lpts->L2_m.x, lpts->L2_m.y, lpts->L2_m.z);
+            std::printf("L3,%.6e,%.6e,%.6e\n", lpts->L3_m.x, lpts->L3_m.y, lpts->L3_m.z);
+            std::printf("L4,%.6e,%.6e,%.6e\n", lpts->L4_m.x, lpts->L4_m.y, lpts->L4_m.z);
+            std::printf("L5,%.6e,%.6e,%.6e\n", lpts->L5_m.x, lpts->L5_m.y, lpts->L5_m.z);
+        }
+    }
+
+    // Convert spacecraft trajectory to synodic frame
+    // Use inertial trajectory (not relative to Earth)
+    const auto traj_opt_inertial = trajectory_options()
+            .duration(days(20.0))
+            .sample_dt(minutes(10.0))
+            .celestial_dt(minutes(5.0))
+            .max_samples(100'000);
+    const std::vector<TrajectorySample> sc_traj_inertial = predict_spacecraft_trajectory(sim, eph, sc_id, traj_opt_inertial);
+    const std::vector<TrajectorySample> sc_traj_synodic = trajectory_to_synodic(sc_traj_inertial, eph, *earth_ptr, *moon_ptr);
+
+    std::printf("sc_synodic\n");
+    for (const auto &s: sc_traj_synodic)
+    {
+        std::printf("%.0f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n", s.t_s, s.position_m.x, s.position_m.y, s.position_m.z,
+                    s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
+    }
+
     return 0;
 }
