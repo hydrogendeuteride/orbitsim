@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Plot orbits from orbitsim CSV output. Usage: ./build/orbitsim_example | python3 plot_orbits.py"""
+"""Plot orbits from orbitsim CSV output. Usage: python3 plot_orbits.py"""
 
 import sys
+import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -68,10 +69,39 @@ def plot(trajs):
     plt.tight_layout()
     plt.savefig('orbit.png', dpi=100)
     print("Saved: orbit.png", file=sys.stderr)
-    plt.show()
+    plt.show()  # Comment out for headless environments
 
-if __name__ == '__main__':
-    trajs = parse(sys.stdin.readlines())
-    print(f"Loaded: {list(trajs.keys())}", file=sys.stderr)
+def main():
+    print("Building and running orbitsim_example...")
+
+    # Build the project
+    try:
+        subprocess.run(['cmake', '--build', 'build', '-j'], check=True, cwd='.')
+    except subprocess.CalledProcessError:
+        print("Error: Failed to build orbitsim_example")
+        print("Make sure to run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release")
+        return 1
+
+    # Run the example and capture output
+    try:
+        result = subprocess.run(['./build/orbitsim_example'],
+                               capture_output=True, text=True, check=True, cwd='.')
+        output_lines = result.stdout.splitlines()
+    except subprocess.CalledProcessError as e:
+        print(f"Error running orbitsim_example: {e}")
+        return 1
+
+    # Parse and visualize
+    trajs = parse(output_lines)
+    print(f"Loaded: {list(trajs.keys())}")
+
     if 'sc_rel_earth' in trajs:
         plot(trajs)
+    else:
+        print("Error: No 'sc_rel_earth' trajectory found in output")
+        return 1
+
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main())
