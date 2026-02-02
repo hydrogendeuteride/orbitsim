@@ -279,6 +279,58 @@ TEST(Frames, SynodicFrameOrthonormalAndBodyFixed)
     EXPECT_TRUE(near_vec_abs(a_back.velocity_mps, states.state_a.velocity_mps, 1e-9));
 }
 
+TEST(Trajectories, TrajectoryToBodyCenteredInertialIsRelative)
+{
+    orbitsim::MassiveBody body{};
+    body.state = orbitsim::make_state({100.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+
+    const orbitsim::CelestialEphemeris eph{};
+
+    const std::vector<orbitsim::TrajectorySample> inertial = {
+            orbitsim::TrajectorySample{.t_s = 0.0, .position_m = {110.0, 0.0, 0.0}, .velocity_mps = {2.0, 0.0, 0.0}},
+    };
+
+    const std::vector<orbitsim::TrajectorySample> bci = orbitsim::trajectory_to_body_centered_inertial(inertial, eph, body);
+    ASSERT_EQ(bci.size(), 1u);
+
+    EXPECT_TRUE(near_vec_abs(bci[0].position_m, orbitsim::Vec3{10.0, 0.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(bci[0].velocity_mps, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-12));
+}
+
+TEST(Trajectories, TrajectoryToBodyFixedMakesFixedPointStationaryAndRoundTrips)
+{
+    const double pi = std::acos(-1.0);
+    constexpr double a_m = 1000.0;
+    constexpr double omega_radps = 2.0;
+    const double theta = 0.5 * pi;
+
+    orbitsim::MassiveBody body{};
+    body.state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, omega_radps, theta);
+
+    const orbitsim::CelestialEphemeris eph{};
+
+    const orbitsim::Vec3 r_i{a_m * std::cos(theta), a_m * std::sin(theta), 0.0};
+    const orbitsim::Vec3 omega_i{0.0, 0.0, omega_radps};
+    const orbitsim::Vec3 v_i = glm::cross(omega_i, r_i);
+
+    const std::vector<orbitsim::TrajectorySample> inertial = {
+            orbitsim::TrajectorySample{.t_s = 0.0, .position_m = r_i, .velocity_mps = v_i},
+    };
+
+    const std::vector<orbitsim::TrajectorySample> ecef = orbitsim::trajectory_to_body_fixed(inertial, eph, body);
+    ASSERT_EQ(ecef.size(), 1u);
+
+    EXPECT_TRUE(near_vec_abs(ecef[0].position_m, orbitsim::Vec3{a_m, 0.0, 0.0}, 1e-9));
+    EXPECT_TRUE(near_vec_abs(ecef[0].velocity_mps, orbitsim::Vec3{0.0, 0.0, 0.0}, 1e-9));
+
+    const std::optional<orbitsim::RotatingFrame> frame = orbitsim::make_body_fixed_frame(body);
+    ASSERT_TRUE(frame.has_value());
+    const orbitsim::TrajectorySample back = orbitsim::frame_sample_to_inertial(ecef[0], *frame);
+
+    EXPECT_TRUE(near_vec_abs(back.position_m, inertial[0].position_m, 1e-9));
+    EXPECT_TRUE(near_vec_abs(back.velocity_mps, inertial[0].velocity_mps, 1e-9));
+}
+
 TEST(GameSimulation, StepReturnsImpactEvent)
 {
     orbitsim::GameSimulation::Config cfg{};

@@ -3,9 +3,9 @@
 #include "orbitsim/detail/spacecraft_propagation.hpp"
 #include "orbitsim/events.hpp"
 #include "orbitsim/nodes.hpp"
-#include "orbitsim/synodic.hpp"
 #include "orbitsim/game_sim.hpp"
 #include "orbitsim/time_utils.hpp"
+#include "orbitsim/trajectory_types.hpp"
 #include "orbitsim/types.hpp"
 
 #include <algorithm>
@@ -16,13 +16,6 @@
 
 namespace orbitsim
 {
-
-    struct TrajectorySample
-    {
-        double t_s{0.0};
-        Vec3 position_m{0.0, 0.0, 0.0};
-        Vec3 velocity_mps{0.0, 0.0, 0.0};
-    };
 
     struct TrajectoryOptions
     {
@@ -899,37 +892,5 @@ namespace orbitsim
 
     /// @brief Start building TrajectoryOptions with the fluent interface.
     inline TrajectoryOptionsBuilder trajectory_options() { return TrajectoryOptionsBuilder{}; }
-
-    /// @brief Convert a single inertial trajectory sample into a synodic rotating frame.
-    /// @note The input sample must be in the same inertial frame as the body states used to construct the SynodicFrame.
-    inline TrajectorySample inertial_sample_to_synodic(const TrajectorySample &sample_in, const SynodicFrame &frame)
-    {
-        const State s_in = make_state(sample_in.position_m, sample_in.velocity_mps);
-        const State s_rot = inertial_state_to_frame(s_in, frame);
-        return TrajectorySample{.t_s = sample_in.t_s, .position_m = s_rot.position_m, .velocity_mps = s_rot.velocity_mps};
-    }
-
-    /// @brief Convert inertial trajectory samples into the time-varying synodic frame of bodies (A,B).
-    /// @note The input samples must be inertial (i.e., not already offset by TrajectoryOptions::origin_body_id).
-    inline std::vector<TrajectorySample> trajectory_to_synodic(const std::vector<TrajectorySample> &samples_in,
-                                                               const CelestialEphemeris &eph,
-                                                               const MassiveBody &body_a,
-                                                               const MassiveBody &body_b)
-    {
-        std::vector<TrajectorySample> out;
-        out.reserve(samples_in.size());
-
-        for (const auto &s: samples_in)
-        {
-            const std::optional<SynodicFrame> frame = make_synodic_frame_at(eph, body_a, body_b, s.t_s);
-            if (!frame.has_value())
-            {
-                return {};
-            }
-            out.push_back(inertial_sample_to_synodic(s, *frame));
-        }
-
-        return out;
-    }
 
 } // namespace orbitsim

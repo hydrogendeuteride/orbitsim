@@ -92,6 +92,31 @@ namespace orbitsim
     }
 
     // -------------------------------------------------------------------------
+    // Frame-to-frame helpers (implemented via inertial as the intermediate).
+    // -------------------------------------------------------------------------
+
+    inline Vec3 frame_vector_to_frame(const RotatingFrame &frame_from, const RotatingFrame &frame_to,
+                                      const Vec3 &v_from)
+    {
+        const Vec3 v_in = frame_vector_to_inertial(frame_from, v_from);
+        return inertial_vector_to_frame(frame_to, v_in);
+    }
+
+    inline Vec3 frame_position_to_frame(const RotatingFrame &frame_from, const RotatingFrame &frame_to,
+                                        const Vec3 &pos_from_m)
+    {
+        const Vec3 pos_in_m = frame_position_to_inertial(frame_from, pos_from_m);
+        return inertial_position_to_frame(frame_to, pos_in_m);
+    }
+
+    inline State frame_state_to_frame(const State &state_from, const RotatingFrame &frame_from,
+                                      const RotatingFrame &frame_to)
+    {
+        const State s_in = frame_state_to_inertial(state_from, frame_from);
+        return inertial_state_to_frame(s_in, frame_to);
+    }
+
+    // -------------------------------------------------------------------------
     // ECI/BCI: Body-centered inertial frame (translation only; no rotation).
     // -------------------------------------------------------------------------
 
