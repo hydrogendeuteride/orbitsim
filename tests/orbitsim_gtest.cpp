@@ -262,8 +262,8 @@ TEST(Frames, SynodicFrameOrthonormalAndBodyFixed)
 
     const double mu = m_b_kg / (m_a_kg + m_b_kg);
 
-    const orbitsim::State a_rot = orbitsim::inertial_state_to_synodic(states.state_a, *frame);
-    const orbitsim::State b_rot = orbitsim::inertial_state_to_synodic(states.state_b, *frame);
+    const orbitsim::State a_rot = orbitsim::inertial_state_to_frame(states.state_a, *frame);
+    const orbitsim::State b_rot = orbitsim::inertial_state_to_frame(states.state_b, *frame);
 
     EXPECT_TRUE(near_vec_abs(a_rot.position_m, orbitsim::Vec3{-mu * separation_m, 0.0, 0.0}, 1e-10));
     EXPECT_TRUE(near_vec_abs(b_rot.position_m, orbitsim::Vec3{(1.0 - mu) * separation_m, 0.0, 0.0}, 1e-10));
@@ -273,7 +273,7 @@ TEST(Frames, SynodicFrameOrthonormalAndBodyFixed)
     EXPECT_TRUE(near_vec_abs(b_rot.velocity_mps, orbitsim::Vec3{0.0, 0.0, 0.0}, 1e-9));
 
     // Round-trip transform sanity check.
-    const orbitsim::State a_back = orbitsim::synodic_state_to_inertial(a_rot, *frame);
+    const orbitsim::State a_back = orbitsim::frame_state_to_inertial(a_rot, *frame);
     EXPECT_TRUE(near_vec_abs(a_back.position_m, states.state_a.position_m, 1e-9));
     EXPECT_TRUE(near_vec_abs(a_back.velocity_mps, states.state_a.velocity_mps, 1e-9));
 }
@@ -310,4 +310,111 @@ TEST(Frames, Cr3bpLagrangePointMarkersConsistency)
     EXPECT_NEAR(f(pts->L1_m.x / separation_m), 0.0, 1e-12);
     EXPECT_NEAR(f(pts->L2_m.x / separation_m), 0.0, 1e-12);
     EXPECT_NEAR(f(pts->L3_m.x / separation_m), 0.0, 1e-12);
+}
+
+TEST(CoordinateFrames, BodyCenteredInertialRoundTrip)
+{
+    const orbitsim::State body_state = orbitsim::make_state({100.0, 200.0, 300.0}, {1.0, 2.0, 3.0});
+    const orbitsim::RotatingFrame bci = orbitsim::make_body_centered_inertial_frame(body_state);
+
+    const orbitsim::State s_in = orbitsim::make_state({110.0, 250.0, 310.0}, {5.0, -2.0, 1.0});
+    const orbitsim::State s_frame = orbitsim::inertial_state_to_frame(s_in, bci);
+    const orbitsim::State s_back = orbitsim::frame_state_to_inertial(s_frame, bci);
+
+    EXPECT_TRUE(near_vec_abs(s_back.position_m, s_in.position_m, 1e-12));
+    EXPECT_TRUE(near_vec_abs(s_back.velocity_mps, s_in.velocity_mps, 1e-12));
+}
+
+TEST(CoordinateFrames, BodyFixedQuarterTurnAboutZ)
+{
+    orbitsim::State body_state{};
+    body_state.position_m = {0.0, 0.0, 0.0};
+    body_state.velocity_mps = {0.0, 0.0, 0.0};
+    body_state.spin.axis = {0.0, 0.0, 1.0};
+    body_state.spin.angle_rad = 0.5 * std::acos(-1.0);
+    body_state.spin.rate_rad_per_s = 1.0;
+
+    const std::optional<orbitsim::RotatingFrame> ecef = orbitsim::make_body_fixed_frame(body_state);
+    ASSERT_TRUE(ecef.has_value());
+
+    // With a +90deg rotation about +Z, inertial +Y aligns with body-fixed +X.
+    const orbitsim::Vec3 v_in{0.0, 1.0, 0.0};
+    const orbitsim::Vec3 v_frame = orbitsim::inertial_vector_to_frame(*ecef, v_in);
+    EXPECT_TRUE(near_vec_abs(v_frame, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-12));
+
+    // And inertial +X maps to body-fixed -Y.
+    const orbitsim::Vec3 x_in{1.0, 0.0, 0.0};
+    const orbitsim::Vec3 x_frame = orbitsim::inertial_vector_to_frame(*ecef, x_in);
+    EXPECT_TRUE(near_vec_abs(x_frame, orbitsim::Vec3{0.0, -1.0, 0.0}, 1e-12));
+}
+
+TEST(CoordinateFrames, LvlhAxesAndOmega)
+{
+    const orbitsim::State primary = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0});
+    const orbitsim::State sc = orbitsim::make_state({7'000'000.0, 0.0, 0.0}, {0.0, 7'500.0, 0.0});
+
+    const std::optional<orbitsim::RotatingFrame> lvlh = orbitsim::make_lvlh_frame(primary, sc);
+    ASSERT_TRUE(lvlh.has_value());
+
+    EXPECT_TRUE(near_vec_abs(lvlh->ex_i, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(lvlh->ey_i, orbitsim::Vec3{0.0, 1.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(lvlh->ez_i, orbitsim::Vec3{0.0, 0.0, 1.0}, 1e-12));
+
+    const double expected_omega = 7'500.0 / 7'000'000.0;
+    EXPECT_TRUE(near_vec_abs(lvlh->omega_inertial_radps, orbitsim::Vec3{0.0, 0.0, expected_omega}, 1e-12));
+}
+
+TEST(Lambert, ZeroRevSolutionPropagatesToTarget)
+{
+    const double mu = 1.0;
+
+    const orbitsim::Vec3 r1{1.0, 0.0, 0.0};
+    const double ang = std::acos(-1.0) / 3.0; // 60 deg
+    const orbitsim::Vec3 r2{std::cos(ang), std::sin(ang), 0.0};
+    const double dt_s = 1.0;
+
+    orbitsim::LambertOptions opt{};
+    opt.max_revolutions = 0;
+    opt.short_path = true;
+    opt.prograde = true;
+
+    const std::vector<orbitsim::LambertSolution> sols = orbitsim::solve_lambert_universal(mu, r1, r2, dt_s, opt);
+    ASSERT_FALSE(sols.empty());
+
+    // For this configuration we expect a single 0-rev solution.
+    ASSERT_EQ(sols.size(), 1u);
+
+    const auto &sol = sols.front();
+    const orbitsim::KeplerStepResult step = orbitsim::propagate_kepler_universal(mu, r1, sol.v1_mps, dt_s);
+    ASSERT_TRUE(step.converged);
+
+    EXPECT_TRUE(near_vec_abs(step.position_m, r2, 1e-6));
+    EXPECT_TRUE(near_vec_abs(step.velocity_mps, sol.v2_mps, 1e-6));
+}
+
+TEST(Lambert, MultiRevSolutionsPropagateToTarget)
+{
+    const double mu = 1.0;
+
+    const orbitsim::Vec3 r1{1.0, 0.0, 0.0};
+    const double ang = std::acos(-1.0) / 3.0; // 60 deg
+    const orbitsim::Vec3 r2{std::cos(ang), std::sin(ang), 0.0};
+
+    // Longer time-of-flight allows multi-revolution solutions.
+    const double dt_s = 10.0;
+
+    orbitsim::LambertOptions opt{};
+    opt.max_revolutions = 2;
+    opt.short_path = true;
+    opt.prograde = true;
+
+    const std::vector<orbitsim::LambertSolution> sols = orbitsim::solve_lambert_universal(mu, r1, r2, dt_s, opt);
+    ASSERT_GE(sols.size(), 2u);
+
+    for (const auto &sol: sols)
+    {
+        const orbitsim::KeplerStepResult step = orbitsim::propagate_kepler_universal(mu, r1, sol.v1_mps, dt_s);
+        ASSERT_TRUE(step.converged);
+        EXPECT_TRUE(near_vec_abs(step.position_m, r2, 1e-5));
+    }
 }

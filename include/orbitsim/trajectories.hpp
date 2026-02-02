@@ -1,7 +1,7 @@
 #pragma once
 
 #include "orbitsim/detail/spacecraft_propagation.hpp"
-#include "orbitsim/frames.hpp"
+#include "orbitsim/synodic.hpp"
 #include "orbitsim/game_sim.hpp"
 #include "orbitsim/time_utils.hpp"
 #include "orbitsim/types.hpp"
@@ -458,7 +458,7 @@ namespace orbitsim
     inline TrajectorySample inertial_sample_to_synodic(const TrajectorySample &sample_in, const SynodicFrame &frame)
     {
         const State s_in = make_state(sample_in.position_m, sample_in.velocity_mps);
-        const State s_rot = inertial_state_to_synodic(s_in, frame);
+        const State s_rot = inertial_state_to_frame(s_in, frame);
         return TrajectorySample{.t_s = sample_in.t_s, .position_m = s_rot.position_m, .velocity_mps = s_rot.velocity_mps};
     }
 

@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 int main()
 {
@@ -167,6 +168,114 @@ int main()
             .origin(moon_id);
     const std::vector<TrajectorySample> sc_traj_moon = predict_spacecraft_trajectory(sim, eph, sc_id, traj_opt_moon);
 
+    // -------------------------------------------------------------------------
+    // Lambert example: Earth-centered transfer targeting the Moon's predicted position
+    // -------------------------------------------------------------------------
+    //
+    // This is a planning/initial-guess tool:
+    // - Solve Lambert in an Earth-centered 2-body model (mu = G * M_earth)
+    // - Convert the Lambert departure velocity into inertial coordinates
+    // - Propagate the resulting spacecraft with the library's N-body gravity (via ephemeris interpolation)
+    //
+    // The result will generally NOT hit the Moon exactly (because N-body != 2-body),
+    // but it provides a useful starting point.
+    const double t_depart_s = sim.time_s();
+    const double dt_transfer_s = days(9.0);
+    const double t_arrive_s = t_depart_s + dt_transfer_s;
+
+    const State earth_at_depart = eph.body_state_at_by_id(earth_id, t_depart_s);
+    const State earth_at_arrive = eph.body_state_at_by_id(earth_id, t_arrive_s);
+    const State moon_at_arrive = eph.body_state_at_by_id(moon_id, t_arrive_s);
+
+    const Vec3 r1_rel_earth_m = (sim.spacecraft_by_id(sc_id)->state.position_m - earth_at_depart.position_m);
+    const Vec3 v0_rel_earth_mps = (sim.spacecraft_by_id(sc_id)->state.velocity_mps - earth_at_depart.velocity_mps);
+    const Vec3 r2_rel_earth_m = (moon_at_arrive.position_m - earth_at_arrive.position_m);
+
+    const double mu_earth_m3_s2 = kGravitationalConstant_SI * Me;
+    LambertOptions lam_opt{};
+    lam_opt.prograde = true;
+    lam_opt.short_path = true;
+    lam_opt.max_revolutions = 2;
+
+    const std::vector<LambertSolution> lam_solutions =
+            solve_lambert_universal(mu_earth_m3_s2, r1_rel_earth_m, r2_rel_earth_m, dt_transfer_s, lam_opt);
+
+    std::optional<LambertSolution> best;
+    double best_dv = std::numeric_limits<double>::infinity();
+    for (const auto &sol: lam_solutions)
+    {
+        const double dv = glm::length(sol.v1_mps - v0_rel_earth_mps);
+        if (dv < best_dv)
+        {
+            best_dv = dv;
+            best = sol;
+        }
+    }
+
+    SpacecraftId sc_lambert_id = kInvalidSpacecraftId;
+    if (best.has_value())
+    {
+        Spacecraft sc_lambert = *sim.spacecraft_by_id(sc_id);
+        sc_lambert.id = kInvalidSpacecraftId;
+        sc_lambert.engines.clear();
+        sc_lambert.prop_mass_kg = 0.0;
+
+        sc_lambert.state.position_m = earth_at_depart.position_m + r1_rel_earth_m;
+        sc_lambert.state.velocity_mps = earth_at_depart.velocity_mps + best->v1_mps;
+
+        sc_lambert_id = sim.add_spacecraft(std::move(sc_lambert));
+    }
+
+    // Lambert output sections (custom parser in visualize_lambert_transfer.py)
+    std::printf("\n--- lambert (earth-centered) ---\n");
+    std::printf("lambert_info\n");
+    std::printf("t_depart_s,%.6f\n", t_depart_s);
+    std::printf("t_arrive_s,%.6f\n", t_arrive_s);
+    std::printf("dt_s,%.6f\n", dt_transfer_s);
+    std::printf("mu_earth_m3_s2,%.6e\n", mu_earth_m3_s2);
+    std::printf("num_solutions,%zu\n", lam_solutions.size());
+    if (best.has_value())
+    {
+        std::printf("best_z,%.12e\n", best->z);
+        std::printf("best_dv_mps,%.6f\n", best_dv);
+        std::printf("best_v1_mps,%.6e,%.6e,%.6e\n", best->v1_mps.x, best->v1_mps.y, best->v1_mps.z);
+        std::printf("best_v2_mps,%.6e,%.6e,%.6e\n", best->v2_mps.x, best->v2_mps.y, best->v2_mps.z);
+    }
+    else
+    {
+        std::printf("best_z,nan\n");
+        std::printf("best_dv_mps,nan\n");
+    }
+
+    if (sc_lambert_id != kInvalidSpacecraftId)
+    {
+        const auto lam_opt_traj = trajectory_options()
+                .duration(dt_transfer_s)
+                .sample_dt(minutes(30.0))
+                .celestial_dt(minutes(10.0))
+                .max_samples(50'000)
+                .origin(earth_id);
+
+        const std::vector<TrajectorySample> lam_sc_rel_earth =
+                predict_spacecraft_trajectory(sim, eph, sc_lambert_id, lam_opt_traj);
+        const std::vector<TrajectorySample> lam_moon_rel_earth =
+                predict_body_trajectory(sim, eph, moon_id, lam_opt_traj);
+
+        std::printf("lambert_sc_rel_earth\n");
+        for (const auto &s: lam_sc_rel_earth)
+        {
+            std::printf("%.0f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n", s.t_s, s.position_m.x, s.position_m.y, s.position_m.z,
+                        s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
+        }
+
+        std::printf("lambert_moon_rel_earth\n");
+        for (const auto &s: lam_moon_rel_earth)
+        {
+            std::printf("%.0f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n", s.t_s, s.position_m.x, s.position_m.y, s.position_m.z,
+                        s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
+        }
+    }
+
     std::printf("\n--- trajectory csv (t_s,x_m,y_m,z_m,vx_mps,vy_mps,vz_mps) ---\n");
     std::printf("earth_rel_sun\n");
     for (const auto &s: earth_traj)
@@ -217,19 +326,19 @@ int main()
     std::printf("\n--- rotating frame (Earth-Moon synodic) ---\n");
 
     // Build synodic frame at t=0
-    const std::optional<SynodicFrame> frame = make_synodic_frame(*earth_ptr, *moon_ptr);
-    if (frame.has_value())
+    const std::optional<SynodicFrame> syn = make_synodic_frame(*earth_ptr, *moon_ptr);
+    if (syn.has_value())
     {
         std::printf("synodic_frame_t0\n");
-        std::printf("separation_m,%.6e\n", frame->separation_m);
-        std::printf("mu,%.6e\n", frame->mu);
+        std::printf("separation_m,%.6e\n", syn->separation_m);
+        std::printf("mu,%.6e\n", syn->mu);
         std::printf("omega_radps,%.6e,%.6e,%.6e\n",
-                    frame->omega_inertial_radps.x,
-                    frame->omega_inertial_radps.y,
-                    frame->omega_inertial_radps.z);
+                    syn->omega_inertial_radps.x,
+                    syn->omega_inertial_radps.y,
+                    syn->omega_inertial_radps.z);
 
         // Compute Lagrange points
-        const std::optional<Cr3bpLagrangePoints> lpts = cr3bp_lagrange_points_m(*frame);
+        const std::optional<Cr3bpLagrangePoints> lpts = cr3bp_lagrange_points_m(*syn);
         if (lpts.has_value())
         {
             std::printf("lagrange_points\n");
@@ -258,6 +367,16 @@ int main()
     {
         std::printf("%.0f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n", s.t_s, s.position_m.x, s.position_m.y, s.position_m.z,
                     s.velocity_mps.x, s.velocity_mps.y, s.velocity_mps.z);
+    }
+
+    // Example: using the generic frame transform API with SynodicFrame (display/analysis only).
+    // Show the Earth state expressed in the synodic frame at t=0.
+    if (syn.has_value())
+    {
+        const State earth_in_syn = inertial_state_to_frame(earth_ptr->state, *syn);
+        std::printf("earth_state_in_synodic_t0\n");
+        std::printf("r_m,%.6e,%.6e,%.6e\n", earth_in_syn.position_m.x, earth_in_syn.position_m.y, earth_in_syn.position_m.z);
+        std::printf("v_mps,%.6e,%.6e,%.6e\n", earth_in_syn.velocity_mps.x, earth_in_syn.velocity_mps.y, earth_in_syn.velocity_mps.z);
     }
 
     return 0;

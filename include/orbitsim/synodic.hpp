@@ -1,5 +1,6 @@
 #pragma once
 
+#include "orbitsim/coordinate_frames.hpp"
 #include "orbitsim/ephemeris.hpp"
 #include "orbitsim/math.hpp"
 #include "orbitsim/types.hpp"
@@ -11,34 +12,17 @@
 namespace orbitsim
 {
 
-    struct SynodicFrame
+    // SynodicFrame is a specialized RotatingFrame used for display/analysis in a
+    // two-body rotating frame (A,B). It intentionally does not implement dynamics.
+    struct SynodicFrame : RotatingFrame
     {
-        Vec3 origin_position_m{0.0, 0.0, 0.0};
-        Vec3 origin_velocity_mps{0.0, 0.0, 0.0};
-
-        // Rotating-frame axes expressed in inertial coordinates (orthonormal basis).
-        // ex_i points from body A to body B.
-        Vec3 ex_i{1.0, 0.0, 0.0};
-        Vec3 ey_i{0.0, 1.0, 0.0};
-        Vec3 ez_i{0.0, 0.0, 1.0};
-
-        // Frame angular velocity expressed in inertial coordinates [rad/s].
-        Vec3 omega_inertial_radps{0.0, 0.0, 0.0};
-
         // Convenience: |rB - rA| [m] and mu = mB / (mA + mB).
         double separation_m{0.0};
         double mu{0.0};
 
         inline bool valid() const
         {
-            return (separation_m > 0.0) && std::isfinite(separation_m) && std::isfinite(mu) &&
-                   std::isfinite(origin_position_m.x) && std::isfinite(origin_position_m.y) &&
-                   std::isfinite(origin_position_m.z) && std::isfinite(origin_velocity_mps.x) &&
-                   std::isfinite(origin_velocity_mps.y) && std::isfinite(origin_velocity_mps.z) &&
-                   std::isfinite(ex_i.x) && std::isfinite(ex_i.y) && std::isfinite(ex_i.z) && std::isfinite(ey_i.x) &&
-                   std::isfinite(ey_i.y) && std::isfinite(ey_i.z) && std::isfinite(ez_i.x) && std::isfinite(ez_i.y) &&
-                   std::isfinite(ez_i.z) && std::isfinite(omega_inertial_radps.x) &&
-                   std::isfinite(omega_inertial_radps.y) && std::isfinite(omega_inertial_radps.z);
+            return RotatingFrame::valid() && (separation_m > 0.0) && std::isfinite(separation_m) && std::isfinite(mu);
         }
     };
 
@@ -53,56 +37,6 @@ namespace orbitsim
         Vec3 L4_m{0.0, 0.0, 0.0};
         Vec3 L5_m{0.0, 0.0, 0.0};
     };
-
-    inline Vec3 inertial_vector_to_synodic(const SynodicFrame &frame, const Vec3 &v_in)
-    {
-        return Vec3{glm::dot(frame.ex_i, v_in), glm::dot(frame.ey_i, v_in), glm::dot(frame.ez_i, v_in)};
-    }
-
-    inline Vec3 synodic_vector_to_inertial(const SynodicFrame &frame, const Vec3 &v_rot)
-    {
-        return frame.ex_i * v_rot.x + frame.ey_i * v_rot.y + frame.ez_i * v_rot.z;
-    }
-
-    inline Vec3 inertial_position_to_synodic(const SynodicFrame &frame, const Vec3 &pos_in_m)
-    {
-        return inertial_vector_to_synodic(frame, pos_in_m - frame.origin_position_m);
-    }
-
-    inline Vec3 synodic_position_to_inertial(const SynodicFrame &frame, const Vec3 &pos_rot_m)
-    {
-        return frame.origin_position_m + synodic_vector_to_inertial(frame, pos_rot_m);
-    }
-
-    inline State inertial_state_to_synodic(const State &state_in, const SynodicFrame &frame)
-    {
-        State out = state_in;
-
-        const Vec3 r_in_rel_m = state_in.position_m - frame.origin_position_m;
-        const Vec3 v_in_rel_mps = state_in.velocity_mps - frame.origin_velocity_mps;
-
-        out.position_m = inertial_vector_to_synodic(frame, r_in_rel_m);
-
-        const Vec3 omega_rot_radps = inertial_vector_to_synodic(frame, frame.omega_inertial_radps);
-        out.velocity_mps =
-                inertial_vector_to_synodic(frame, v_in_rel_mps) - glm::cross(omega_rot_radps, out.position_m);
-
-        return out;
-    }
-
-    inline State synodic_state_to_inertial(const State &state_rot, const SynodicFrame &frame)
-    {
-        State out = state_rot;
-
-        out.position_m = synodic_position_to_inertial(frame, state_rot.position_m);
-
-        const Vec3 omega_rot_radps = inertial_vector_to_synodic(frame, frame.omega_inertial_radps);
-        const Vec3 v_in_rel_mps = synodic_vector_to_inertial(
-                frame, state_rot.velocity_mps + glm::cross(omega_rot_radps, state_rot.position_m));
-        out.velocity_mps = frame.origin_velocity_mps + v_in_rel_mps;
-
-        return out;
-    }
 
     inline std::optional<SynodicFrame> make_synodic_frame(const State &a_state, const double mass_a_kg,
                                                           const State &b_state, const double mass_b_kg)

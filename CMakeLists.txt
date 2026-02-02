@@ -3,7 +3,8 @@ project(orbitsim LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_library(orbitsim INTERFACE)
+add_library(orbitsim INTERFACE
+        include/orbitsim/lambert.hpp)
 target_include_directories(orbitsim
         INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR}/include

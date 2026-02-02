@@ -2,12 +2,14 @@
 
 #include "orbitsim/integrators.hpp"
 #include "orbitsim/kepler.hpp"
+#include "orbitsim/lambert.hpp"
 #include "orbitsim/math.hpp"
 #include "orbitsim/types.hpp"
 
 #include "orbitsim/ephemeris.hpp"
 #include "orbitsim/events.hpp"
-#include "orbitsim/frames.hpp"
+#include "orbitsim/coordinate_frames.hpp"
+#include "orbitsim/synodic.hpp"
 #include "orbitsim/game_sim.hpp"
 #include "orbitsim/maneuvers.hpp"
 #include "orbitsim/orbit_utils.hpp"
