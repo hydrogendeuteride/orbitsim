@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <optional>
 #include <vector>
 
 namespace
@@ -276,6 +277,345 @@ TEST(Frames, SynodicFrameOrthonormalAndBodyFixed)
     const orbitsim::State a_back = orbitsim::frame_state_to_inertial(a_rot, *frame);
     EXPECT_TRUE(near_vec_abs(a_back.position_m, states.state_a.position_m, 1e-9));
     EXPECT_TRUE(near_vec_abs(a_back.velocity_mps, states.state_a.velocity_mps, 1e-9));
+}
+
+TEST(GameSimulation, StepReturnsImpactEvent)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = true;
+    cfg.events.time_tol_s = 1e-6;
+    cfg.events.dist_tol_m = 1e-6;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const orbitsim::GameSimulation::BodyHandle body_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 0.0,
+            .radius_m = 1.0,
+            .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+    });
+    ASSERT_TRUE(body_h.valid());
+
+    const orbitsim::GameSimulation::SpacecraftHandle sc_h = sim.create_spacecraft(orbitsim::Spacecraft{
+            .state = orbitsim::make_state({2.0, 0.0, 0.0}, {-1.0, 0.0, 0.0}),
+            .dry_mass_kg = 1.0,
+            .prop_mass_kg = 0.0,
+    });
+    ASSERT_TRUE(sc_h.valid());
+
+    std::vector<orbitsim::Event> events;
+    sim.step(5.0, &events);
+
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.front().type, orbitsim::EventType::Impact);
+    EXPECT_EQ(events.front().body_id, body_h.id);
+    EXPECT_EQ(events.front().spacecraft_id, sc_h.id);
+    EXPECT_EQ(events.front().crossing, orbitsim::Crossing::Enter);
+    EXPECT_TRUE(near_abs(events.front().t_event_s, 1.0, 1e-3));
+}
+
+TEST(Trajectories, PredictSpacecraftEventsFindsImpact)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.events.time_tol_s = 1e-6;
+    cfg.events.dist_tol_m = 1e-6;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const orbitsim::GameSimulation::BodyHandle body_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 0.0,
+            .radius_m = 1.0,
+            .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+    });
+    ASSERT_TRUE(body_h.valid());
+
+    const orbitsim::GameSimulation::SpacecraftHandle sc_h = sim.create_spacecraft(orbitsim::Spacecraft{
+            .state = orbitsim::make_state({2.0, 0.0, 0.0}, {-1.0, 0.0, 0.0}),
+            .dry_mass_kg = 1.0,
+            .prop_mass_kg = 0.0,
+    });
+    ASSERT_TRUE(sc_h.valid());
+
+    orbitsim::TrajectoryOptions opt{};
+    opt.duration_s = 5.0;
+    opt.sample_dt_s = 1.0;
+    opt.celestial_dt_s = 1.0;
+    opt.max_samples = 64;
+
+    const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris(sim, opt);
+    const std::vector<orbitsim::Event> events = orbitsim::predict_spacecraft_events(sim, eph, sc_h.id, opt, cfg.events);
+
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.front().type, orbitsim::EventType::Impact);
+    EXPECT_EQ(events.front().crossing, orbitsim::Crossing::Enter);
+    EXPECT_TRUE(near_abs(events.front().t_event_s, 1.0, 1e-3));
+}
+
+TEST(Maneuvers, ImpulseChangesVelocity)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const orbitsim::GameSimulation::BodyHandle body_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 0.0,
+            .radius_m = 1.0,
+            .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+    });
+    ASSERT_TRUE(body_h.valid());
+
+    const orbitsim::GameSimulation::SpacecraftHandle sc_h = sim.create_spacecraft(orbitsim::Spacecraft{
+            .state = orbitsim::make_state({10.0, 0.0, 0.0}, {0.0, 1.0, 0.0}),
+            .dry_mass_kg = 1.0,
+            .prop_mass_kg = 0.0,
+    });
+    ASSERT_TRUE(sc_h.valid());
+
+    sim.maneuver_plan().impulses.push_back(orbitsim::impulse().time(1.0).prograde(5.0).primary(body_h).spacecraft(sc_h));
+
+    sim.step(2.0);
+
+    const orbitsim::Spacecraft *out = sim.spacecraft_by_id(sc_h.id);
+    ASSERT_NE(out, nullptr);
+    EXPECT_TRUE(near_abs(out->state.velocity_mps.y, 6.0, 1e-9));
+}
+
+TEST(Geodesy, RoundTripGeodeticSpherical)
+{
+    orbitsim::MassiveBody body{};
+    body.radius_m = 1'000.0;
+    body.state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 1.0, 0.0);
+
+    const std::optional<orbitsim::RotatingFrame> bf = orbitsim::make_body_fixed_frame(body);
+    ASSERT_TRUE(bf.has_value());
+
+    const orbitsim::GeodeticCoord c0{.latitude_rad = 0.3, .longitude_rad = -1.0, .altitude_m = 123.0};
+    const orbitsim::Vec3 p_i = orbitsim::inertial_position_from_geodetic(*bf, c0, body.radius_m);
+    const std::optional<orbitsim::GeodeticCoord> c1 = orbitsim::geodetic_from_inertial(*bf, p_i, body.radius_m);
+    ASSERT_TRUE(c1.has_value());
+
+    EXPECT_TRUE(near_abs(c1->latitude_rad, c0.latitude_rad, 1e-12));
+    EXPECT_TRUE(near_abs(c1->longitude_rad, c0.longitude_rad, 1e-12));
+    EXPECT_TRUE(near_abs(c1->altitude_m, c0.altitude_m, 1e-9));
+}
+
+TEST(Math, OrbitalElementsRoundTripToState)
+{
+    const double mu = 3.986004418e14; // Earth mu [m^3/s^2]
+
+    orbitsim::OrbitalElements el{};
+    el.semi_major_axis_m = 7'000'000.0;
+    el.eccentricity = 0.1;
+    el.inclination_rad = 0.5;
+    el.raan_rad = 1.0;
+    el.arg_periapsis_rad = 0.3;
+    el.true_anomaly_rad = 0.9;
+
+    const orbitsim::State s0 = orbitsim::relative_state_from_orbital_elements(mu, el);
+    ASSERT_TRUE(std::isfinite(s0.position_m.x));
+    ASSERT_TRUE(std::isfinite(s0.velocity_mps.x));
+
+    const orbitsim::OrbitalElements el2 = orbitsim::orbital_elements_from_relative_state(mu, s0.position_m, s0.velocity_mps);
+    const orbitsim::State s1 = orbitsim::relative_state_from_orbital_elements(mu, el2);
+
+    EXPECT_TRUE(near_vec_abs(s1.position_m, s0.position_m, 1e-3));
+    EXPECT_TRUE(near_vec_abs(s1.velocity_mps, s0.velocity_mps, 1e-6));
+}
+
+TEST(GameSimulation, ProximityEnterExitWithHysteresis)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = true;
+    cfg.events.time_tol_s = 1e-6;
+    cfg.events.dist_tol_m = 1e-3;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    constexpr orbitsim::SpacecraftId center_id = 123u;
+    constexpr orbitsim::SpacecraftId target_id = 456u;
+
+    cfg.proximity.enable = true;
+    cfg.proximity.center_spacecraft_id = center_id;
+    cfg.proximity.enter_radius_m = 1.0e6;
+    cfg.proximity.exit_radius_m = 1.2e6;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const auto center_h = sim.create_spacecraft_with_id(center_id, orbitsim::Spacecraft{
+                                                                  .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+                                                                  .dry_mass_kg = 1.0,
+                                                                  .prop_mass_kg = 0.0,
+                                                          });
+    ASSERT_TRUE(center_h.valid());
+
+    const auto target_h = sim.create_spacecraft_with_id(target_id, orbitsim::Spacecraft{
+                                                                  .state = orbitsim::make_state({2.0e6, 0.0, 0.0}, {-500.0, 0.0, 0.0}),
+                                                                  .dry_mass_kg = 1.0,
+                                                                  .prop_mass_kg = 0.0,
+                                                          });
+    ASSERT_TRUE(target_h.valid());
+
+    std::vector<orbitsim::Event> events;
+    sim.step(7000.0, &events);
+
+    std::vector<orbitsim::Event> prox;
+    for (const auto &e: events)
+    {
+        if (e.type == orbitsim::EventType::Proximity)
+        {
+            prox.push_back(e);
+        }
+    }
+
+    ASSERT_EQ(prox.size(), 2u);
+    EXPECT_EQ(prox[0].crossing, orbitsim::Crossing::Enter);
+    EXPECT_EQ(prox[0].spacecraft_id, target_id);
+    EXPECT_EQ(prox[0].other_spacecraft_id, center_id);
+    EXPECT_TRUE(near_abs(prox[0].t_event_s, 2000.0, 1e-2));
+
+    EXPECT_EQ(prox[1].crossing, orbitsim::Crossing::Exit);
+    EXPECT_EQ(prox[1].spacecraft_id, target_id);
+    EXPECT_EQ(prox[1].other_spacecraft_id, center_id);
+    EXPECT_TRUE(near_abs(prox[1].t_event_s, 6400.0, 1e-2));
+}
+
+TEST(Nodes, PredictEquatorialNodesLinearMotion)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.events.time_tol_s = 1e-6;
+    cfg.events.dist_tol_m = 1e-6;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    orbitsim::MassiveBody body{};
+    body.radius_m = 1.0;
+    body.state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 0.0, 0.0);
+    const auto body_h = sim.create_body(body);
+    ASSERT_TRUE(body_h.valid());
+
+    const auto sc_h = sim.create_spacecraft(orbitsim::Spacecraft{
+            .state = orbitsim::make_state({0.0, 0.0, -1.0}, {0.0, 0.0, 1.0}),
+            .dry_mass_kg = 1.0,
+            .prop_mass_kg = 0.0,
+    });
+    ASSERT_TRUE(sc_h.valid());
+
+    orbitsim::TrajectoryOptions opt{};
+    opt.duration_s = 3.0;
+    opt.sample_dt_s = 1.0;
+    opt.celestial_dt_s = 1.0;
+    opt.max_samples = 64;
+
+    const auto eph = orbitsim::build_celestial_ephemeris(sim, opt);
+    const std::vector<orbitsim::NodeEvent> nodes = orbitsim::predict_equatorial_nodes(sim, eph, sc_h.id, body_h.id, opt, cfg.events);
+    ASSERT_FALSE(nodes.empty());
+    EXPECT_TRUE(near_abs(nodes.front().t_event_s, 1.0, 1e-3));
+    EXPECT_EQ(nodes.front().crossing, orbitsim::NodeCrossing::Ascending);
+}
+
+TEST(Nodes, PredictTargetPlaneNodesLinearMotion)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.events.time_tol_s = 1e-6;
+    cfg.events.dist_tol_m = 1e-6;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    orbitsim::MassiveBody body{};
+    body.radius_m = 1.0;
+    body.state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 0.0, 0.0);
+    const auto body_h = sim.create_body(body);
+    ASSERT_TRUE(body_h.valid());
+
+    // Target defines the reference plane: choose motion in XY plane => normal roughly +Z.
+    const auto target_h = sim.create_spacecraft(orbitsim::Spacecraft{
+            .state = orbitsim::make_state({0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}),
+            .dry_mass_kg = 1.0,
+            .prop_mass_kg = 0.0,
+    });
+    ASSERT_TRUE(target_h.valid());
+
+    // Spacecraft crosses the target plane at t=1 (z goes from +1 to 0).
+    const auto sc_h = sim.create_spacecraft(orbitsim::Spacecraft{
+            .state = orbitsim::make_state({0.0, 0.0, 1.0}, {0.0, 0.0, -1.0}),
+            .dry_mass_kg = 1.0,
+            .prop_mass_kg = 0.0,
+    });
+    ASSERT_TRUE(sc_h.valid());
+
+    orbitsim::TrajectoryOptions opt{};
+    opt.duration_s = 3.0;
+    opt.sample_dt_s = 1.0;
+    opt.celestial_dt_s = 1.0;
+    opt.max_samples = 64;
+
+    const auto eph = orbitsim::build_celestial_ephemeris(sim, opt);
+    const std::vector<orbitsim::NodeEvent> nodes =
+            orbitsim::predict_target_plane_nodes(sim, eph, sc_h.id, target_h.id, body_h.id, opt, cfg.events);
+    ASSERT_FALSE(nodes.empty());
+    EXPECT_TRUE(near_abs(nodes.front().t_event_s, 1.0, 1e-3));
+}
+
+TEST(Math, OrbitalElementsAboutAxisUsesSpinAxis)
+{
+    const double mu = 1.0e5;
+    const orbitsim::Vec3 ref_axis = orbitsim::normalized_or(orbitsim::Vec3{0.0, 1.0, 0.0}, {0.0, 1.0, 0.0});
+
+    // Simple orbit in XZ plane => angular momentum along +Y.
+    const orbitsim::Vec3 r{1.0, 0.0, 0.0};
+    const orbitsim::Vec3 v{0.0, 0.0, 1.0};
+
+    const orbitsim::OrbitalElements el = orbitsim::orbital_elements_from_relative_state_about_axis(mu, r, v, ref_axis);
+    EXPECT_TRUE(near_abs(el.inclination_rad, 0.0, 1e-9));
+    EXPECT_TRUE(std::isfinite(el.mean_anomaly_rad) || std::isnan(el.mean_anomaly_rad));
+}
+
+TEST(Math, ApsidesFromElementsMatchRadii)
+{
+    const double mu = 3.986004418e14; // Earth mu [m^3/s^2]
+
+    orbitsim::OrbitalElements el{};
+    el.semi_major_axis_m = 7'000'000.0;
+    el.eccentricity = 0.2;
+    el.inclination_rad = 0.1;
+    el.raan_rad = 0.4;
+    el.arg_periapsis_rad = 0.7;
+    el.true_anomaly_rad = 1.2;
+
+    const orbitsim::State s = orbitsim::relative_state_from_orbital_elements(mu, el);
+    const orbitsim::OrbitApsides aps = orbitsim::apsides_from_relative_state(mu, s.position_m, s.velocity_mps);
+    ASSERT_TRUE(aps.valid);
+
+    const double rp_expected = el.semi_major_axis_m * (1.0 - el.eccentricity);
+    const double ra_expected = el.semi_major_axis_m * (1.0 + el.eccentricity);
+
+    EXPECT_TRUE(near_rel(glm::length(aps.periapsis_rel_m), rp_expected, 1e-12, 1.0));
+    ASSERT_TRUE(aps.has_apoapsis);
+    EXPECT_TRUE(near_rel(glm::length(aps.apoapsis_rel_m), ra_expected, 1e-12, 1.0));
+
+    // Periapsis and apoapsis should be opposite directions in the orbit plane.
+    const double d = glm::dot(orbitsim::normalized_or(aps.periapsis_rel_m, {1.0, 0.0, 0.0}),
+                              orbitsim::normalized_or(aps.apoapsis_rel_m, {-1.0, 0.0, 0.0}));
+    EXPECT_LT(d, -0.999999);
 }
 
 TEST(Frames, Cr3bpLagrangePointMarkersConsistency)

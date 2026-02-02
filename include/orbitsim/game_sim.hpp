@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <unordered_set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -43,6 +44,16 @@ namespace orbitsim
             DOPRI5Options spacecraft_integrator{};
             EventOptions events{};
             bool enable_events{true};
+
+            struct ProximityOptions
+            {
+                bool enable{false};
+                SpacecraftId center_spacecraft_id{kInvalidSpacecraftId};
+                double enter_radius_m{0.0};
+                double exit_radius_m{0.0}; // Use >= enter_radius_m for hysteresis.
+            };
+
+            ProximityOptions proximity{};
         };
 
         GameSimulation() = default;
@@ -279,6 +290,15 @@ namespace orbitsim
 
         void step(const double dt_s)
         {
+            step(dt_s, nullptr);
+        }
+
+        void step(const double dt_s, std::vector<Event> *out_events)
+        {
+            if (out_events != nullptr)
+            {
+                out_events->clear();
+            }
             if (!(dt_s != 0.0) || !std::isfinite(dt_s))
             {
                 return;
@@ -295,7 +315,57 @@ namespace orbitsim
                 return;
             }
 
-            sort_segments_by_start(plan_);
+            sort_plan(plan_);
+
+            const bool proximity_enabled =
+                    cfg_.proximity.enable && (cfg_.proximity.center_spacecraft_id != kInvalidSpacecraftId) &&
+                    (cfg_.proximity.enter_radius_m > 0.0) && std::isfinite(cfg_.proximity.enter_radius_m) &&
+                    (cfg_.proximity.exit_radius_m > 0.0) && std::isfinite(cfg_.proximity.exit_radius_m);
+
+            const double proximity_enter_m = proximity_enabled ? cfg_.proximity.enter_radius_m : 0.0;
+            const double proximity_exit_m =
+                    proximity_enabled ? std::max(cfg_.proximity.enter_radius_m, cfg_.proximity.exit_radius_m) : 0.0;
+
+            // Initialize/refresh proximity active set when enabled or center changes.
+            if (proximity_enabled)
+            {
+                if (proximity_center_id_ != cfg_.proximity.center_spacecraft_id)
+                {
+                    proximity_center_id_ = cfg_.proximity.center_spacecraft_id;
+                    proximity_active_.clear();
+                    proximity_initialized_ = false;
+                }
+
+                const Spacecraft *center_ptr = spacecraft_by_id(proximity_center_id_);
+                if (center_ptr == nullptr)
+                {
+                    proximity_active_.clear();
+                    proximity_initialized_ = false;
+                }
+                else if (!proximity_initialized_)
+                {
+                    // Treat anything within the exit radius as active at initialization.
+                    for (const auto &sc: spacecraft_)
+                    {
+                        if (sc.id == proximity_center_id_)
+                        {
+                            continue;
+                        }
+                        const double d = glm::length(sc.state.position_m - center_ptr->state.position_m);
+                        if (d <= proximity_exit_m)
+                        {
+                            proximity_active_.insert(sc.id);
+                        }
+                    }
+                    proximity_initialized_ = true;
+                }
+            }
+            else
+            {
+                proximity_center_id_ = kInvalidSpacecraftId;
+                proximity_active_.clear();
+                proximity_initialized_ = false;
+            }
 
             double remaining = dt_s;
             int splits = 0;
@@ -310,6 +380,8 @@ namespace orbitsim
                 preview_step_no_events_(massive_preview, spacecraft_preview, t_preview, remaining, &eph_preview);
 
                 std::optional<Event> best;
+
+                // Boundary events (impact/atmosphere/SOI) for all spacecraft.
                 for (const auto &sc: spacecraft_)
                 {
                     auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
@@ -321,6 +393,37 @@ namespace orbitsim
                     if (e.has_value() && (!best.has_value() || e->t_event_s < best->t_event_s))
                     {
                         best = e;
+                    }
+                }
+
+                // Proximity events: one center spacecraft vs all targets.
+                if (proximity_enabled && proximity_center_id_ != kInvalidSpacecraftId)
+                {
+                    const Spacecraft *center_ptr = spacecraft_by_id(proximity_center_id_);
+                    if (center_ptr != nullptr)
+                    {
+                        const Spacecraft center0 = *center_ptr;
+                        auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
+                                                const double dt_sc_s) -> Spacecraft {
+                            return propagate_spacecraft_(sc_start, eph_preview, t0_s, dt_sc_s);
+                        };
+
+                        for (const auto &target: spacecraft_)
+                        {
+                            if (target.id == proximity_center_id_)
+                            {
+                                continue;
+                            }
+
+                            const bool active = proximity_active_.contains(target.id);
+                            const double threshold = active ? proximity_exit_m : proximity_enter_m;
+                            const std::optional<Event> e = find_earliest_proximity_event_in_interval(
+                                    eph_preview, center0, target, time_s_, remaining, threshold, cfg_.events, propagate_sc);
+                            if (e.has_value() && (!best.has_value() || e->t_event_s < best->t_event_s))
+                            {
+                                best = e;
+                            }
+                        }
                     }
                 }
 
@@ -350,7 +453,26 @@ namespace orbitsim
                     dt_event = remaining;
                 }
 
+                if (out_events != nullptr)
+                {
+                    Event e = *best;
+                    e.t_event_s = time_s_ + dt_event;
+                    out_events->push_back(e);
+                }
+
                 do_step_no_events_(dt_event);
+
+                if (best->type == EventType::Proximity)
+                {
+                    if (best->crossing == Crossing::Enter)
+                    {
+                        proximity_active_.insert(best->spacecraft_id);
+                    }
+                    else
+                    {
+                        proximity_active_.erase(best->spacecraft_id);
+                    }
+                }
                 remaining -= dt_event;
             }
 
@@ -446,6 +568,10 @@ namespace orbitsim
         SpacecraftId next_spacecraft_id_{1};
         std::unordered_map<SpacecraftId, std::size_t> spacecraft_id_to_index_{};
         ManeuverPlan plan_{};
+
+        SpacecraftId proximity_center_id_{kInvalidSpacecraftId};
+        std::unordered_set<SpacecraftId> proximity_active_{};
+        bool proximity_initialized_{false};
     };
 
 } // namespace orbitsim

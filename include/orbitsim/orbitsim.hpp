@@ -15,3 +15,5 @@
 #include "orbitsim/orbit_utils.hpp"
 #include "orbitsim/time_utils.hpp"
 #include "orbitsim/trajectories.hpp"
+#include "orbitsim/geodesy.hpp"
+#include "orbitsim/nodes.hpp"

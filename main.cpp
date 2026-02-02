@@ -68,6 +68,28 @@ int main()
         return 1;
     }
 
+    // -------------------------------------------------------------------------
+    // Basic body metadata for downstream parsers/visualizers
+    // -------------------------------------------------------------------------
+    std::printf("\n--- bodies ---\n");
+    std::printf("bodies\n");
+    auto print_body = [&](BodyId id, const char *name) {
+        const MassiveBody *b = sim.body_by_id(id);
+        if (b == nullptr)
+        {
+            return;
+        }
+        std::printf("%u,%s,%.6e,%.6e,%.6e\n",
+                    static_cast<unsigned>(b->id),
+                    name,
+                    b->radius_m,
+                    b->atmosphere_top_height_m,
+                    b->soi_radius_m);
+    };
+    print_body(sun_id, "sun");
+    print_body(earth_id, "earth");
+    print_body(moon_id, "moon");
+
     // A spacecraft in LEO with a few planned burns (Earth injection + mid-course correction + lunar capture).
     const double sc_altitude_m = 300'000.0;
     const double sc_inc_rad = glm::radians(28.5);
@@ -90,6 +112,37 @@ int main()
         return 1;
     }
     const SpacecraftId sc_id = sc_h.id;
+
+    // -------------------------------------------------------------------------
+    // Extra "event probe" spacecraft for testing event detection/visualization.
+    // -------------------------------------------------------------------------
+
+    // Reentry/impact probe near Earth (guaranteed to cross atmosphere + impact soon).
+    SpacecraftId sc_reentry_id = kInvalidSpacecraftId;
+    {
+        const double alt_m = 120'000.0;
+        const Vec3 r0 = Vec3{earth_ptr->radius_m + alt_m, 0.0, 0.0};
+        const Vec3 v0 = Vec3{-250.0, 0.0, 0.0}; // inward in Earth-centered inertial
+        Spacecraft sc_reentry{
+                .state = make_state(earth_ptr->state.position_m + r0, earth_ptr->state.velocity_mps + v0),
+                .dry_mass_kg = 100.0,
+                .prop_mass_kg = 0.0,
+        };
+        sc_reentry_id = sim.add_spacecraft(std::move(sc_reentry));
+    }
+
+    // Moon SOI probe: starts just outside Moon SOI and drifts inward, triggering SOI enter event.
+    SpacecraftId sc_moon_soi_id = kInvalidSpacecraftId;
+    {
+        const Vec3 r0 = Vec3{moon_ptr->soi_radius_m + 1.0e6, 0.0, 0.0};
+        const Vec3 v0 = Vec3{-200.0, 0.0, 0.0};
+        Spacecraft sc_moon_soi{
+                .state = make_state(moon_ptr->state.position_m + r0, moon_ptr->state.velocity_mps + v0),
+                .dry_mass_kg = 100.0,
+                .prop_mass_kg = 0.0,
+        };
+        sc_moon_soi_id = sim.add_spacecraft(std::move(sc_moon_soi));
+    }
 
     // Injection burn: prograde in RTN (Earth primary).
     sim.maneuver_plan().segments.push_back(
@@ -167,6 +220,42 @@ int main()
             .max_samples(100'000)
             .origin(moon_id);
     const std::vector<TrajectorySample> sc_traj_moon = predict_spacecraft_trajectory(sim, eph, sc_id, traj_opt_moon);
+
+    // Short-horizon trajectories for event probes (keep output small and avoid singular behavior past impact).
+    const auto reentry_short_inertial = trajectory_options()
+            .duration(minutes(12.0))
+            .sample_dt(seconds(1.0))
+            .celestial_dt(seconds(1.0))
+            .max_samples(20'000);
+    const auto reentry_short_earth = trajectory_options()
+            .duration(minutes(12.0))
+            .sample_dt(seconds(1.0))
+            .celestial_dt(seconds(1.0))
+            .max_samples(20'000)
+            .origin(earth_id);
+
+    const auto moon_soi_short_inertial = trajectory_options()
+            .duration(hours(4.0))
+            .sample_dt(seconds(10.0))
+            .celestial_dt(seconds(10.0))
+            .max_samples(20'000);
+    const auto moon_soi_short_moon = trajectory_options()
+            .duration(hours(4.0))
+            .sample_dt(seconds(10.0))
+            .celestial_dt(seconds(10.0))
+            .max_samples(20'000)
+            .origin(moon_id);
+
+    std::vector<TrajectorySample> sc_reentry_rel_earth;
+    std::vector<TrajectorySample> sc_moon_soi_rel_moon;
+    if (sc_reentry_id != kInvalidSpacecraftId)
+    {
+        sc_reentry_rel_earth = predict_spacecraft_trajectory(sim, eph, sc_reentry_id, reentry_short_earth);
+    }
+    if (sc_moon_soi_id != kInvalidSpacecraftId)
+    {
+        sc_moon_soi_rel_moon = predict_spacecraft_trajectory(sim, eph, sc_moon_soi_id, moon_soi_short_moon);
+    }
 
     // -------------------------------------------------------------------------
     // Lambert example: Earth-centered transfer targeting the Moon's predicted position
@@ -377,6 +466,155 @@ int main()
         std::printf("earth_state_in_synodic_t0\n");
         std::printf("r_m,%.6e,%.6e,%.6e\n", earth_in_syn.position_m.x, earth_in_syn.position_m.y, earth_in_syn.position_m.z);
         std::printf("v_mps,%.6e,%.6e,%.6e\n", earth_in_syn.velocity_mps.x, earth_in_syn.velocity_mps.y, earth_in_syn.velocity_mps.z);
+    }
+
+    // -------------------------------------------------------------------------
+    // Event and node prediction output (for visualization/debugging)
+    // -------------------------------------------------------------------------
+    std::printf("\n--- predicted events/nodes ---\n");
+
+    auto event_type_str = [](const EventType t) -> const char * {
+        switch (t)
+        {
+        case EventType::Impact:
+            return "impact";
+        case EventType::AtmosphereBoundary:
+            return "atmosphere";
+        case EventType::SoiBoundary:
+            return "soi";
+        default:
+            return "unknown";
+        }
+    };
+    auto crossing_str = [](const Crossing c) -> const char * {
+        switch (c)
+        {
+        case Crossing::Enter:
+            return "enter";
+        case Crossing::Exit:
+            return "exit";
+        default:
+            return "unknown";
+        }
+    };
+    auto node_str = [](const NodeCrossing c) -> const char * {
+        switch (c)
+        {
+        case NodeCrossing::Ascending:
+            return "AN";
+        case NodeCrossing::Descending:
+            return "DN";
+        default:
+            return "?";
+        }
+    };
+
+    // Predict boundary events (impact/atmosphere/SOI) on the N-body ephemeris.
+    std::printf("events_sc\n");
+    const std::vector<Event> ev = predict_spacecraft_events(sim, eph, sc_id, traj_opt_inertial);
+    for (const auto &e: ev)
+    {
+        std::printf("%.6f,%s,%u,%s\n",
+                    e.t_event_s,
+                    event_type_str(e.type),
+                    static_cast<unsigned>(e.body_id),
+                    crossing_str(e.crossing));
+    }
+
+    // Event probe outputs (small CSV blocks)
+    if (sc_reentry_id != kInvalidSpacecraftId)
+    {
+        std::printf("events_reentry_sc\n");
+        const std::vector<Event> ev_reentry =
+                predict_spacecraft_events(sim, eph, sc_reentry_id, reentry_short_inertial);
+        for (const auto &e: ev_reentry)
+        {
+            std::printf("%.6f,%s,%u,%s\n",
+                        e.t_event_s,
+                        event_type_str(e.type),
+                        static_cast<unsigned>(e.body_id),
+                        crossing_str(e.crossing));
+        }
+
+        std::printf("reentry_sc_rel_earth\n");
+        for (const auto &s: sc_reentry_rel_earth)
+        {
+            std::printf("%.6f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n",
+                        s.t_s,
+                        s.position_m.x,
+                        s.position_m.y,
+                        s.position_m.z,
+                        s.velocity_mps.x,
+                        s.velocity_mps.y,
+                        s.velocity_mps.z);
+        }
+    }
+
+    if (sc_moon_soi_id != kInvalidSpacecraftId)
+    {
+        std::printf("events_moon_soi_sc\n");
+        const std::vector<Event> ev_soi =
+                predict_spacecraft_events(sim, eph, sc_moon_soi_id, moon_soi_short_inertial);
+        for (const auto &e: ev_soi)
+        {
+            std::printf("%.6f,%s,%u,%s\n",
+                        e.t_event_s,
+                        event_type_str(e.type),
+                        static_cast<unsigned>(e.body_id),
+                        crossing_str(e.crossing));
+        }
+
+        std::printf("moon_soi_sc_rel_moon\n");
+        for (const auto &s: sc_moon_soi_rel_moon)
+        {
+            std::printf("%.6f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n",
+                        s.t_s,
+                        s.position_m.x,
+                        s.position_m.y,
+                        s.position_m.z,
+                        s.velocity_mps.x,
+                        s.velocity_mps.y,
+                        s.velocity_mps.z);
+        }
+    }
+
+    // Equatorial nodes: crossings of the primary body's equator plane (spin axis normal).
+    std::printf("equatorial_nodes_sc_earth\n");
+    const std::vector<NodeEvent> eq_nodes = predict_equatorial_nodes(sim, eph, sc_id, earth_id, traj_opt_inertial);
+    for (const auto &n: eq_nodes)
+    {
+        std::printf("%.6f,%s\n", n.t_event_s, node_str(n.crossing));
+    }
+
+    // Target plane nodes: crossings of the target spacecraft's current orbit plane about the same primary.
+    // (In a KSP-like UI, this is the "AN/DN relative to target orbit" you show in the map view.)
+    if (sc_lambert_id != kInvalidSpacecraftId)
+    {
+        std::printf("target_nodes_sc_to_lambert_earth\n");
+        const std::vector<NodeEvent> tgt_nodes =
+                predict_target_plane_nodes(sim, eph, sc_id, sc_lambert_id, earth_id, traj_opt_inertial);
+        for (const auto &n: tgt_nodes)
+        {
+            std::printf("%.6f,%s\n", n.t_event_s, node_str(n.crossing));
+        }
+    }
+
+    // Apsides markers from osculating Earth-centered elements at t=0 (relative to Earth).
+    {
+        const State earth0 = eph.body_state_at_by_id(earth_id, sim.time_s());
+        const State sc0 = sim.spacecraft_by_id(sc_id)->state;
+        const Vec3 r_rel = sc0.position_m - earth0.position_m;
+        const Vec3 v_rel = sc0.velocity_mps - earth0.velocity_mps;
+        const OrbitApsides aps = apsides_from_relative_state(mu_earth_m3_s2, r_rel, v_rel);
+        std::printf("apsides_sc_rel_earth_t0\n");
+        if (aps.valid)
+        {
+            std::printf("peri,%.6e,%.6e,%.6e\n", aps.periapsis_rel_m.x, aps.periapsis_rel_m.y, aps.periapsis_rel_m.z);
+            if (aps.has_apoapsis)
+            {
+                std::printf("apo,%.6e,%.6e,%.6e\n", aps.apoapsis_rel_m.x, aps.apoapsis_rel_m.y, aps.apoapsis_rel_m.z);
+            }
+        }
     }
 
     return 0;

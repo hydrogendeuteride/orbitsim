@@ -118,7 +118,64 @@ namespace orbitsim
         double raan_rad{0.0};
         double arg_periapsis_rad{0.0};
         double true_anomaly_rad{0.0};
+        double mean_anomaly_rad{std::numeric_limits<double>::quiet_NaN()};
     };
+
+    struct KeplerAnomalyResult
+    {
+        double mean_anomaly_rad{std::numeric_limits<double>::quiet_NaN()};
+        double eccentric_anomaly_rad{std::numeric_limits<double>::quiet_NaN()}; // Elliptic only
+        double hyperbolic_anomaly_rad{std::numeric_limits<double>::quiet_NaN()}; // Hyperbolic only
+        bool elliptic{false};
+        bool hyperbolic{false};
+        bool valid{false};
+    };
+
+    inline KeplerAnomalyResult kepler_anomalies_from_true_anomaly(const double e, const double true_anomaly_rad)
+    {
+        KeplerAnomalyResult out;
+        if (!(e >= 0.0) || !std::isfinite(e) || !std::isfinite(true_anomaly_rad))
+        {
+            return out;
+        }
+
+        const double nu = true_anomaly_rad;
+        const double half_nu = 0.5 * nu;
+        const double s = std::sin(half_nu);
+        const double c = std::cos(half_nu);
+
+        const double eps = 1e-12;
+        if (e < 1.0 - eps)
+        {
+            // Elliptic: tan(nu/2) = sqrt((1+e)/(1-e)) * tan(E/2)
+            const double k = std::sqrt((1.0 - e) / (1.0 + e));
+            const double E = 2.0 * std::atan2(k * s, c);
+            const double M = E - e * std::sin(E);
+            out.eccentric_anomaly_rad = E;
+            out.mean_anomaly_rad = M;
+            out.elliptic = true;
+            out.valid = std::isfinite(M);
+            return out;
+        }
+
+        if (e > 1.0 + eps)
+        {
+            // Hyperbolic: tanh(H/2) = sqrt((e-1)/(e+1)) * tan(nu/2)
+            const double t = std::tan(half_nu);
+            const double k = std::sqrt((e - 1.0) / (e + 1.0));
+            const double x = k * t;
+            const double H = 2.0 * std::atanh(x);
+            const double M = e * std::sinh(H) - H;
+            out.hyperbolic_anomaly_rad = H;
+            out.mean_anomaly_rad = M;
+            out.hyperbolic = true;
+            out.valid = std::isfinite(M);
+            return out;
+        }
+
+        // Parabolic (e ~= 1): leave NaN for now.
+        return out;
+    }
 
     inline OrbitalElements orbital_elements_from_relative_state(const double mu_m3_s2, const Vec3 &r_rel_m,
                                                                 const Vec3 &v_rel_mps)
@@ -197,7 +254,337 @@ namespace orbitsim
             el.true_anomaly_rad = wrap_angle_0_2pi(std::atan2(r_rel_m.y, r_rel_m.x));
         }
 
+        const KeplerAnomalyResult anom = kepler_anomalies_from_true_anomaly(el.eccentricity, el.true_anomaly_rad);
+        el.mean_anomaly_rad = anom.mean_anomaly_rad;
+
         return el;
+    }
+
+    inline OrbitalElements orbital_elements_from_relative_state_about_axis(const double mu_m3_s2, const Vec3 &r_rel_m,
+                                                                           const Vec3 &v_rel_mps,
+                                                                           const Vec3 &ref_axis_unit_i)
+    {
+        OrbitalElements el;
+        if (!(mu_m3_s2 > 0.0) || !std::isfinite(mu_m3_s2))
+        {
+            return el;
+        }
+
+        const Vec3 k = normalized_or(ref_axis_unit_i, Vec3{0.0, 0.0, 0.0});
+        const double k2 = glm::dot(k, k);
+        if (!(k2 > 0.0) || !std::isfinite(k2))
+        {
+            return el;
+        }
+
+        const double r = glm::length(r_rel_m);
+        const double v2 = glm::dot(v_rel_mps, v_rel_mps);
+        if (!(r > 0.0) || !std::isfinite(r) || !std::isfinite(v2))
+        {
+            return el;
+        }
+
+        const Vec3 h = glm::cross(r_rel_m, v_rel_mps);
+        const double hmag = glm::length(h);
+        if (!(hmag > 0.0) || !std::isfinite(hmag))
+        {
+            return el;
+        }
+        const Vec3 hhat = h / hmag;
+
+        const Vec3 evec = (glm::cross(v_rel_mps, h) / mu_m3_s2) - (r_rel_m / r);
+        const double e = glm::length(evec);
+        el.eccentricity = (std::isfinite(e) ? e : 0.0);
+
+        const double energy = 0.5 * v2 - mu_m3_s2 / r;
+        if (std::abs(energy) > 1e-30 && std::isfinite(energy))
+        {
+            el.semi_major_axis_m = -mu_m3_s2 / (2.0 * energy);
+        }
+
+        el.inclination_rad = wrap_angle_0_2pi(std::acos(std::clamp(glm::dot(hhat, k), -1.0, 1.0)));
+
+        // Build a deterministic reference direction in the reference plane.
+        Vec3 ref_x = Vec3{1.0, 0.0, 0.0} - glm::dot(Vec3{1.0, 0.0, 0.0}, k) * k;
+        if (glm::dot(ref_x, ref_x) <= 1e-24 || !std::isfinite(glm::dot(ref_x, ref_x)))
+        {
+            ref_x = Vec3{0.0, 1.0, 0.0} - glm::dot(Vec3{0.0, 1.0, 0.0}, k) * k;
+        }
+        ref_x = normalized_or(ref_x, Vec3{1.0, 0.0, 0.0});
+        const Vec3 ref_y = normalized_or(glm::cross(k, ref_x), Vec3{0.0, 1.0, 0.0});
+
+        const Vec3 n = glm::cross(k, h);
+        const double nmag = glm::length(n);
+
+        const double eps = 1e-10;
+        Vec3 nhat{0.0, 0.0, 0.0};
+        if (nmag > 1e-24 && std::isfinite(nmag))
+        {
+            nhat = n / nmag;
+            const double x = glm::dot(nhat, ref_x);
+            const double y = glm::dot(nhat, ref_y);
+            el.raan_rad = wrap_angle_0_2pi(std::atan2(y, x));
+        }
+        else
+        {
+            el.raan_rad = 0.0;
+        }
+
+        if (el.eccentricity > eps && nmag > 1e-24)
+        {
+            const Vec3 ehat = evec / el.eccentricity;
+            const double x = glm::dot(ehat, nhat);
+            const double y = glm::dot(glm::cross(nhat, ehat), hhat);
+            el.arg_periapsis_rad = wrap_angle_0_2pi(std::atan2(y, x));
+
+            const Vec3 rhat = r_rel_m / r;
+            const double xt = glm::dot(rhat, ehat);
+            const double yt = glm::dot(glm::cross(ehat, rhat), hhat);
+            el.true_anomaly_rad = wrap_angle_0_2pi(std::atan2(yt, xt));
+        }
+        else if (nmag > 1e-24)
+        {
+            // Circular: use argument of latitude u measured from node.
+            const Vec3 rhat = r_rel_m / r;
+            const double x = glm::dot(rhat, nhat);
+            const double y = glm::dot(glm::cross(nhat, rhat), hhat);
+            el.arg_periapsis_rad = 0.0;
+            el.true_anomaly_rad = wrap_angle_0_2pi(std::atan2(y, x));
+        }
+        else
+        {
+            // Equatorial circular: use inertial angle in plane.
+            const Vec3 r_proj = r_rel_m - glm::dot(r_rel_m, k) * k;
+            const double rproj = glm::length(r_proj);
+            if (rproj > 0.0 && std::isfinite(rproj))
+            {
+                const Vec3 rhat = r_proj / rproj;
+                const double x = glm::dot(rhat, ref_x);
+                const double y = glm::dot(rhat, ref_y);
+                el.raan_rad = 0.0;
+                el.arg_periapsis_rad = 0.0;
+                el.true_anomaly_rad = wrap_angle_0_2pi(std::atan2(y, x));
+            }
+        }
+
+        const KeplerAnomalyResult anom = kepler_anomalies_from_true_anomaly(el.eccentricity, el.true_anomaly_rad);
+        el.mean_anomaly_rad = anom.mean_anomaly_rad;
+        return el;
+    }
+
+    inline OrbitalElements orbital_elements_from_state(const double mu_m3_s2, const State &primary_state_in,
+                                                       const State &sc_state_in)
+    {
+        return orbital_elements_from_relative_state(mu_m3_s2,
+                                                    sc_state_in.position_m - primary_state_in.position_m,
+                                                    sc_state_in.velocity_mps - primary_state_in.velocity_mps);
+    }
+
+    inline OrbitalElements orbital_elements_from_state_about_axis(const double mu_m3_s2, const State &primary_state_in,
+                                                                  const State &sc_state_in,
+                                                                  const Vec3 &ref_axis_unit_i)
+    {
+        return orbital_elements_from_relative_state_about_axis(mu_m3_s2,
+                                                              sc_state_in.position_m - primary_state_in.position_m,
+                                                              sc_state_in.velocity_mps - primary_state_in.velocity_mps,
+                                                              ref_axis_unit_i);
+    }
+
+    inline State relative_state_from_orbital_elements(const double mu_m3_s2, const OrbitalElements &el)
+    {
+        State out{};
+        if (!(mu_m3_s2 > 0.0) || !std::isfinite(mu_m3_s2))
+        {
+            return out;
+        }
+        if (!std::isfinite(el.semi_major_axis_m) || !(std::abs(el.semi_major_axis_m) > 0.0))
+        {
+            return out;
+        }
+        const double e = std::max(0.0, el.eccentricity);
+        const double a = el.semi_major_axis_m;
+        const double p = a * (1.0 - e * e);
+        if (!(p > 0.0) || !std::isfinite(p))
+        {
+            return out;
+        }
+
+        const double ta = el.true_anomaly_rad;
+        if (!std::isfinite(ta))
+        {
+            return out;
+        }
+
+        const double cta = std::cos(ta);
+        const double sta = std::sin(ta);
+        const double denom = 1.0 + e * cta;
+        if (!(denom > 0.0) || !std::isfinite(denom))
+        {
+            return out;
+        }
+
+        const double r = p / denom;
+        if (!(r > 0.0) || !std::isfinite(r))
+        {
+            return out;
+        }
+
+        // Perifocal coordinates (PQW), z=0.
+        const Vec3 r_pf{r * cta, r * sta, 0.0};
+        const double sqrt_mu_over_p = std::sqrt(mu_m3_s2 / p);
+        const Vec3 v_pf{-sqrt_mu_over_p * sta, sqrt_mu_over_p * (e + cta), 0.0};
+
+        // Basis vectors of the perifocal frame expressed in inertial coordinates.
+        const double cO = std::cos(el.raan_rad);
+        const double sO = std::sin(el.raan_rad);
+        const double ci = std::cos(el.inclination_rad);
+        const double si = std::sin(el.inclination_rad);
+        const double cw = std::cos(el.arg_periapsis_rad);
+        const double sw = std::sin(el.arg_periapsis_rad);
+
+        const Vec3 P{cO * cw - sO * sw * ci, sO * cw + cO * sw * ci, sw * si};
+        const Vec3 Q{-cO * sw - sO * cw * ci, -sO * sw + cO * cw * ci, cw * si};
+
+        out.position_m = r_pf.x * P + r_pf.y * Q;
+        out.velocity_mps = v_pf.x * P + v_pf.y * Q;
+        return out;
+    }
+
+    inline State state_from_orbital_elements(const double mu_m3_s2, const State &primary_state_in,
+                                             const OrbitalElements &el)
+    {
+        State rel = relative_state_from_orbital_elements(mu_m3_s2, el);
+        rel.position_m += primary_state_in.position_m;
+        rel.velocity_mps += primary_state_in.velocity_mps;
+        return rel;
+    }
+
+    struct OrbitScalars
+    {
+        double periapsis_radius_m{std::numeric_limits<double>::infinity()};
+        double apoapsis_radius_m{std::numeric_limits<double>::infinity()};
+        double period_s{std::numeric_limits<double>::infinity()};
+        double mean_motion_radps{0.0};
+        bool valid{false};
+    };
+
+    inline OrbitScalars orbit_scalars_from_elements(const double mu_m3_s2, const OrbitalElements &el)
+    {
+        OrbitScalars out;
+        if (!(mu_m3_s2 > 0.0) || !std::isfinite(mu_m3_s2))
+        {
+            return out;
+        }
+        const double a = el.semi_major_axis_m;
+        const double e = el.eccentricity;
+        if (!std::isfinite(a) || !std::isfinite(e))
+        {
+            return out;
+        }
+
+        out.periapsis_radius_m = a * (1.0 - e);
+        if (e < 1.0)
+        {
+            out.apoapsis_radius_m = a * (1.0 + e);
+            if (a > 0.0)
+            {
+                const double n = std::sqrt(mu_m3_s2 / (a * a * a));
+                out.mean_motion_radps = (std::isfinite(n) ? n : 0.0);
+                const double two_pi = 2.0 * std::acos(-1.0);
+                out.period_s = (out.mean_motion_radps > 0.0) ? (two_pi / out.mean_motion_radps)
+                                                             : std::numeric_limits<double>::infinity();
+            }
+        }
+        out.valid = std::isfinite(out.periapsis_radius_m);
+        return out;
+    }
+
+    struct OrbitApsides
+    {
+        Vec3 periapsis_rel_m{0.0, 0.0, 0.0};
+        Vec3 apoapsis_rel_m{0.0, 0.0, 0.0};
+        double periapsis_radius_m{std::numeric_limits<double>::infinity()};
+        double apoapsis_radius_m{std::numeric_limits<double>::infinity()};
+        bool has_apoapsis{false};
+        bool valid{false};
+    };
+
+    inline OrbitApsides apsides_from_relative_state(const double mu_m3_s2, const Vec3 &r_rel_m, const Vec3 &v_rel_mps)
+    {
+        OrbitApsides out;
+        if (!(mu_m3_s2 > 0.0) || !std::isfinite(mu_m3_s2))
+        {
+            return out;
+        }
+
+        const double r = glm::length(r_rel_m);
+        if (!(r > 0.0) || !std::isfinite(r))
+        {
+            return out;
+        }
+
+        const Vec3 h = glm::cross(r_rel_m, v_rel_mps);
+        const double h2 = glm::dot(h, h);
+        if (!(h2 > 0.0) || !std::isfinite(h2))
+        {
+            return out;
+        }
+
+        const double p = h2 / mu_m3_s2;
+        if (!(p > 0.0) || !std::isfinite(p))
+        {
+            return out;
+        }
+
+        // Eccentricity vector points toward periapsis.
+        const Vec3 evec = (glm::cross(v_rel_mps, h) / mu_m3_s2) - (r_rel_m / r);
+        const double e = glm::length(evec);
+        if (!std::isfinite(e))
+        {
+            return out;
+        }
+
+        const double rp = p / (1.0 + e);
+        if (!(rp > 0.0) || !std::isfinite(rp))
+        {
+            return out;
+        }
+
+        // For near-circular orbits, periapsis direction is undefined; use current radius direction so markers behave.
+        const double eps_e = 1e-10;
+        const Vec3 ehat = (e > eps_e) ? normalized_or(evec, r_rel_m / r) : (r_rel_m / r);
+
+        out.periapsis_radius_m = rp;
+        out.periapsis_rel_m = rp * ehat;
+
+        if (e < 1.0 - eps_e)
+        {
+            const double ra = p / (1.0 - e);
+            if (ra > 0.0 && std::isfinite(ra))
+            {
+                out.has_apoapsis = true;
+                out.apoapsis_radius_m = ra;
+                out.apoapsis_rel_m = -ra * ehat;
+            }
+        }
+
+        out.valid = true;
+        return out;
+    }
+
+    inline OrbitApsides apsides_from_state(const double mu_m3_s2, const State &primary_state_in,
+                                           const State &sc_state_in)
+    {
+        OrbitApsides out = apsides_from_relative_state(mu_m3_s2,
+                                                       sc_state_in.position_m - primary_state_in.position_m,
+                                                       sc_state_in.velocity_mps - primary_state_in.velocity_mps);
+        if (!out.valid)
+        {
+            return out;
+        }
+        out.periapsis_rel_m += primary_state_in.position_m;
+        out.apoapsis_rel_m += primary_state_in.position_m;
+        return out;
     }
 
     inline double stumpff_C(const double z)
