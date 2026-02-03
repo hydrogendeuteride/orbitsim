@@ -12,32 +12,61 @@
 namespace orbitsim
 {
 
-    // SynodicFrame is a specialized RotatingFrame used for display/analysis in a
-    // two-body rotating frame (A,B). It intentionally does not implement dynamics.
+    /**
+     * @brief Two-body synodic (co-rotating) frame derived from two inertial body states (A,B).
+     *
+     * This is a specialized RotatingFrame primarily for display/analysis. It intentionally does not
+     * implement CR3BP dynamics; it only provides a consistent translating/rotating frame definition.
+     */
     struct SynodicFrame : RotatingFrame
     {
-        // Convenience: |rB - rA| [m] and mu = mB / (mA + mB).
+        /// Separation distance `|r_B - r_A|` [m].
         double separation_m{0.0};
+        /// Mass ratio `μ = m_B / (m_A + m_B)` (dimensionless).
         double mu{0.0};
 
+        /// @brief Returns true if the frame and derived parameters are finite and well-formed.
         inline bool valid() const
         {
             return RotatingFrame::valid() && (separation_m > 0.0) && std::isfinite(separation_m) && std::isfinite(mu);
         }
     };
 
+    /**
+     * @brief CR3BP Lagrange points in the synodic rotating frame (origin at the barycenter).
+     *
+     * All positions are expressed in the synodic frame coordinates and are dimensional [m].
+     */
     struct Cr3bpLagrangePoints
     {
-        // Positions in the synodic rotating frame with origin at the barycenter [m].
+        /// Primary body position [m].
         Vec3 primary_m{0.0, 0.0, 0.0};
+        /// Secondary body position [m].
         Vec3 secondary_m{0.0, 0.0, 0.0};
+        /// Collinear point between the primaries [m].
         Vec3 L1_m{0.0, 0.0, 0.0};
+        /// Collinear point beyond the secondary [m].
         Vec3 L2_m{0.0, 0.0, 0.0};
+        /// Collinear point beyond the primary [m].
         Vec3 L3_m{0.0, 0.0, 0.0};
+        /// Triangular point leading the secondary by 60° [m].
         Vec3 L4_m{0.0, 0.0, 0.0};
+        /// Triangular point trailing the secondary by 60° [m].
         Vec3 L5_m{0.0, 0.0, 0.0};
     };
 
+    /**
+     * @brief Construct a synodic (barycentric, co-rotating) frame from two inertial body states.
+     *
+     * The frame is defined as:
+     * - Origin: barycenter position/velocity of (A,B)
+     * - `ex_i`: along the relative position from A to B
+     * - `ez_i`: along `r×v` (orbit normal), falling back to a deterministic perpendicular if degenerate
+     * - `ey_i`: completes a right-handed orthonormal basis
+     * - `omega_inertial_radps`: instantaneous angular velocity `ω = (r×v)/|r|^2` (in inertial coords)
+     *
+     * @return `std::nullopt` if masses are invalid/non-finite, bodies are coincident, or geometry is degenerate.
+     */
     inline std::optional<SynodicFrame> make_synodic_frame(const State &a_state, const double mass_a_kg,
                                                           const State &b_state, const double mass_b_kg)
     {
@@ -103,6 +132,7 @@ namespace orbitsim
 
     namespace detail
     {
+        /// @brief CR3BP collinear equilibrium equation (non-dimensional, x-axis with y=z=0).
         inline double cr3bp_collinear_equation_nd_(const double x, const double mu)
         {
             const double x1 = x + mu;
@@ -121,6 +151,14 @@ namespace orbitsim
             return x - (1.0 - mu) * (x1 * inv1) - mu * (x2 * inv2);
         }
 
+        /**
+         * @brief Solve for a collinear CR3BP root in a bracket using bisection (non-dimensional x).
+         *
+         * @param mu Mass ratio `μ` (dimensionless).
+         * @param x_min Lower bracket bound.
+         * @param x_max Upper bracket bound.
+         * @return Root if the bracket is valid and a sign change exists; `std::nullopt` otherwise.
+         */
         inline std::optional<double> solve_cr3bp_collinear_root_nd_(const double mu, double x_min, double x_max)
         {
             if (!(x_min < x_max) || !std::isfinite(x_min) || !std::isfinite(x_max) || !std::isfinite(mu))
@@ -183,6 +221,15 @@ namespace orbitsim
         }
     } // namespace detail
 
+    /**
+     * @brief Compute CR3BP L1-L5 positions in meters from a synodic frame.
+     *
+     * Uses the synodic frame's `separation_m` and `mu`:
+     * - L4/L5 are placed at the classical equilateral locations
+     * - L1/L2/L3 are solved along the x-axis using bisection on the collinear equilibrium equation
+     *
+     * @return `std::nullopt` if `frame` is invalid, `mu` is not in (0,1), or root finding fails.
+     */
     inline std::optional<Cr3bpLagrangePoints> cr3bp_lagrange_points_m(const SynodicFrame &frame)
     {
         if (!frame.valid())
@@ -232,6 +279,7 @@ namespace orbitsim
         return out;
     }
 
+    /// @brief Compute CR3BP L1-L5 at time `t_s` (builds a synodic frame via ephemeris if available).
     inline std::optional<Cr3bpLagrangePoints> cr3bp_lagrange_points_m_at(const CelestialEphemeris &eph,
                                                                          const MassiveBody &a, const MassiveBody &b,
                                                                          const double t_s)

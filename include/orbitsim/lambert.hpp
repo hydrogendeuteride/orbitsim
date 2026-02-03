@@ -11,37 +11,56 @@
 namespace orbitsim
 {
 
+    /**
+     * @brief Options for the Lambert solver.
+     */
     struct LambertOptions
     {
-        // "Prograde/retrograde" selection uses the sign of (r1 x r2).z, matching the previous lambert.hpp behavior.
+        /// If true, select prograde transfer (orbit normal aligned with +Z).
+        /// Uses sign of (r1 x r2).z to determine direction.
         bool prograde{true};
+
+        /// If true, use short-path transfer (< 180 deg); otherwise long-path.
         bool short_path{true};
 
-        // Maximum revolutions to consider when searching for solutions.
-        // Note: Lambert can have 0-rev and multi-rev solutions depending on time-of-flight.
+        /// Maximum revolutions to consider (0 = direct transfer only).
+        /// Multi-rev solutions exist when TOF exceeds minimum-energy transfer time.
         int max_revolutions{0};
 
+        /// Maximum iterations for bisection root-finder.
         int max_bisect_iters{96};
+
+        /// Convergence tolerance for time-of-flight matching [s].
         double time_abs_tolerance_s{1e-9};
 
-        // Root scan resolution (higher finds multi-rev roots more reliably at the cost of performance).
-        // Internally clamped to a reasonable range.
+        /// Number of samples for root scanning (0 = auto, clamped to [2000, 40000]).
+        /// Higher values find multi-rev roots more reliably at cost of performance.
         int scan_samples{0};
     };
 
+    /**
+     * @brief Result of a Lambert problem solution.
+     */
     struct LambertSolution
     {
-        Vec3 v1_mps{0.0, 0.0, 0.0};
-        Vec3 v2_mps{0.0, 0.0, 0.0};
-        double z{0.0}; // universal-variable root parameter
-        bool converged{false};
-        int iterations{0};
+        Vec3 v1_mps{0.0, 0.0, 0.0};  ///< Velocity at departure position [m/s].
+        Vec3 v2_mps{0.0, 0.0, 0.0};  ///< Velocity at arrival position [m/s].
+        double z{0.0};               ///< Universal variable root parameter.
+        bool converged{false};       ///< True if solution converged within tolerance.
+        int iterations{0};           ///< Number of iterations used.
     };
 
     namespace detail
     {
         inline double clamp_cos_(const double c) { return std::clamp(c, -1.0, 1.0); }
 
+        /**
+         * @brief Computes the transfer angle between two position vectors.
+         * @param r1 Departure position vector [m].
+         * @param r2 Arrival position vector [m].
+         * @param opt Lambert options (prograde/retrograde, short/long path).
+         * @return Transfer angle in radians, or nullopt if degenerate (collinear vectors).
+         */
         inline std::optional<double> transfer_angle_(const Vec3 &r1, const Vec3 &r2, const LambertOptions &opt)
         {
             const double r1n = glm::length(r1);
@@ -92,15 +111,29 @@ namespace orbitsim
             return dTheta;
         }
 
+        /// Intermediate result from time-of-flight evaluation.
         struct TimeOfFlightEval
         {
-            double dt_s{0.0};
-            double y{0.0};
-            double C{0.0};
-            double S{0.0};
-            bool valid{false};
+            double dt_s{0.0};  ///< Computed time-of-flight [s].
+            double y{0.0};     ///< Intermediate variable for velocity computation.
+            double C{0.0};     ///< Stumpff C(z) value.
+            double S{0.0};     ///< Stumpff S(z) value.
+            bool valid{false}; ///< True if evaluation succeeded.
         };
 
+        /**
+         * @brief Evaluates time-of-flight for a given universal variable z.
+         *
+         * Uses Stumpff functions C(z) and S(z) to compute TOF for the universal
+         * variable formulation of Lambert's problem.
+         *
+         * @param mu_m3_s2 Gravitational parameter [m^3/s^2].
+         * @param r1_m Magnitude of departure position [m].
+         * @param r2_m Magnitude of arrival position [m].
+         * @param A Geometry parameter: sin(dTheta) * sqrt(r1*r2 / (1 - cos(dTheta))).
+         * @param z Universal variable to evaluate.
+         * @return TimeOfFlightEval with computed TOF and intermediate values.
+         */
         inline TimeOfFlightEval time_of_flight_universal_(const double mu_m3_s2, const double r1_m, const double r2_m,
                                                           const double A, const double z)
         {
@@ -150,6 +183,14 @@ namespace orbitsim
             return out;
         }
 
+        /**
+         * @brief Finds z root via bisection where TOF(z) = target_dt_s.
+         * @param z_lo Lower bound of search interval.
+         * @param z_hi Upper bound of search interval.
+         * @param target_dt_s Desired time-of-flight [s].
+         * @param out_iters If non-null, receives iteration count.
+         * @return The z value satisfying TOF(z) ≈ target_dt_s, or nullopt if no root.
+         */
         inline std::optional<double> bisect_root_(const double mu_m3_s2, const double r1_m, const double r2_m, const double A,
                                                   const double target_dt_s, const double z_lo, const double z_hi,
                                                   const LambertOptions &opt, int *out_iters)
@@ -237,6 +278,7 @@ namespace orbitsim
             return 0.5 * (a + b);
         }
 
+        /// Adds z to roots if no existing root is within eps of it.
         inline bool add_unique_root_(std::vector<double> &roots, const double z, const double eps)
         {
             for (double r: roots)
@@ -252,16 +294,22 @@ namespace orbitsim
 
     } // namespace detail
 
-    // -------------------------------------------------------------------------
-    // Lambert solver (universal-variable formulation).
-    //
-    // Returns all solutions found for the given geometry and time-of-flight, including
-    // multi-revolution solutions up to opt.max_revolutions (if they exist).
-    //
-    // Notes:
-    // - Degenerate cases (nearly collinear r1/r2 or transfer angle ~ 0/pi) return {}.
-    // - For multi-rev, there can be 2 solutions per revolution count; this returns all roots found.
-    // -------------------------------------------------------------------------
+    /**
+     * @brief Solves Lambert's problem using universal variable formulation.
+     *
+     * Given two position vectors and a time-of-flight, finds the velocities
+     * that connect them via a conic trajectory under two-body dynamics.
+     *
+     * @param mu_m3_s2 Gravitational parameter of central body [m^3/s^2].
+     * @param r1_m     Departure position vector [m].
+     * @param r2_m     Arrival position vector [m].
+     * @param dt_s     Time-of-flight [s], must be positive.
+     * @param opt      Solver options (transfer type, multi-rev settings).
+     * @return Vector of solutions (may be empty, or contain multiple for multi-rev).
+     *
+     * @note Returns empty vector for degenerate cases (collinear r1/r2, dt <= 0).
+     * @note Multi-rev transfers can yield up to 2 solutions per revolution count.
+     */
     inline std::vector<LambertSolution>
     solve_lambert_universal(const double mu_m3_s2, const Vec3 &r1_m, const Vec3 &r2_m, const double dt_s,
                             const LambertOptions &opt = {})

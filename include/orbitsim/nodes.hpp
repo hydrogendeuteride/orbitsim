@@ -11,12 +11,19 @@
 namespace orbitsim
 {
 
+    /// @brief Node crossing direction relative to a reference plane.
     enum class NodeCrossing
     {
         Ascending,
         Descending,
     };
 
+    /**
+     * @brief Event describing a spacecraft crossing a plane ("node" event).
+     *
+     * The plane is typically defined relative to a primary body and a plane normal in inertial coordinates.
+     * If `target_spacecraft_id` is set, the plane may represent another spacecraft's orbital plane.
+     */
     struct NodeEvent
     {
         double t_event_s{0.0};
@@ -33,6 +40,7 @@ namespace orbitsim
             return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
         }
 
+        /// @brief Find the index of a body by id (returns nullopt if not found/invalid).
         inline std::optional<std::size_t> body_index_for_id_(const std::vector<MassiveBody> &bodies, const BodyId id)
         {
             if (id == kInvalidBodyId)
@@ -50,6 +58,31 @@ namespace orbitsim
         }
 
         template<class EphemerisLike, class Propagator>
+        /**
+         * @brief Find the earliest plane-node crossing in `[t0_s, t0_s + dt_s]` using bisection on signed distance.
+         *
+         * A crossing is detected when the signed distance to the plane changes sign (or either endpoint is within
+         * `opt.dist_tol_m`). The event time is refined with bisection, where the spacecraft state is re-propagated
+         * from `sc0` at each midpoint via `propagate_sc`.
+         *
+         * The returned crossing direction is determined from the relative velocity projected onto the plane normal
+         * at the event time.
+         *
+         * @tparam EphemerisLike Type providing `body_position_at(index,t)` and `body_velocity_at(index,t)`.
+         * @tparam Propagator Callable with signature `(Spacecraft sc0, double t0_s, double dt_s) -> Spacecraft`.
+         *
+         * @param bodies Massive bodies (used for id -> index mapping).
+         * @param eph Ephemeris-like provider for primary body state.
+         * @param sc0 Spacecraft state at `t0_s`.
+         * @param t0_s Interval start time [s].
+         * @param dt_s Interval length [s] (must be > 0).
+         * @param primary_body_id Primary body id defining the relative position for plane distance.
+         * @param plane_normal_unit_i Plane normal (expected unit length) expressed in inertial coordinates.
+         * @param target_spacecraft_id Optional target spacecraft id (metadata for "target plane" nodes).
+         * @param opt Event detection tolerances and max bisection iterations.
+         * @param propagate_sc Propagator used to evaluate the spacecraft state at candidate times.
+         * @return NodeEvent if a crossing is detected/refined; `std::nullopt` otherwise.
+         */
         inline std::optional<NodeEvent> find_earliest_plane_node_in_interval_(
                 const std::vector<MassiveBody> &bodies,
                 const EphemerisLike &eph,
@@ -169,4 +202,3 @@ namespace orbitsim
     } // namespace detail
 
 } // namespace orbitsim
-

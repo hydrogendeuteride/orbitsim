@@ -10,10 +10,13 @@
 namespace orbitsim
 {
 
-    // Spherical geodetic coordinates on a rotating body.
-    // - latitude_rad: [-pi/2, +pi/2]
-    // - longitude_rad: [-pi, +pi]
-    // - altitude_m: above radius_m
+    /**
+     * @brief Spherical geodetic coordinates on a rotating body.
+     *
+     * - `latitude_rad`: [-pi/2, +pi/2]
+     * - `longitude_rad`: [-pi, +pi]
+     * - `altitude_m`: above `body_radius_m`
+     */
     struct GeodeticCoord
     {
         double latitude_rad{0.0};
@@ -21,6 +24,17 @@ namespace orbitsim
         double altitude_m{0.0};
     };
 
+    /**
+     * @brief Convert an inertial position to spherical geodetic coordinates on a rotating body.
+     *
+     * Uses the provided body-fixed frame to compute latitude/longitude from the body-fixed position,
+     * and altitude as `|r_bf| - body_radius_m`.
+     *
+     * @param body_fixed_frame Body-fixed rotating frame (ECEF-like).
+     * @param pos_inertial_m Position in inertial coordinates [m].
+     * @param body_radius_m Spherical body radius [m].
+     * @return Geodetic coordinate if inputs are valid; `std::nullopt` otherwise.
+     */
     inline std::optional<GeodeticCoord> geodetic_from_inertial(const RotatingFrame &body_fixed_frame,
                                                                const Vec3 &pos_inertial_m,
                                                                const double body_radius_m)
@@ -48,6 +62,14 @@ namespace orbitsim
         return out;
     }
 
+    /**
+     * @brief Convert spherical geodetic coordinates to an inertial position.
+     *
+     * Computes body-fixed Cartesian position from (lat, lon, radius+alt) and transforms it into inertial
+     * using `body_fixed_frame`.
+     *
+     * @return Inertial position [m], or `{0,0,0}` if inputs are invalid.
+     */
     inline Vec3 inertial_position_from_geodetic(const RotatingFrame &body_fixed_frame,
                                                 const GeodeticCoord &coord,
                                                 const double body_radius_m)
@@ -72,6 +94,14 @@ namespace orbitsim
         return frame_position_to_inertial(body_fixed_frame, r_bf_m);
     }
 
+    /**
+     * @brief Inertial velocity of a surface-fixed point on a rotating body.
+     *
+     * Treats the point as rigidly attached to the rotating frame:
+     * `v = v_origin + ω × (r - r_origin)`.
+     *
+     * @return Inertial velocity [m/s], or `{0,0,0}` if `body_fixed_frame` is invalid.
+     */
     inline Vec3 inertial_velocity_of_fixed_point(const RotatingFrame &body_fixed_frame, const Vec3 &pos_inertial_m)
     {
         if (!body_fixed_frame.valid())
@@ -82,11 +112,16 @@ namespace orbitsim
         return body_fixed_frame.origin_velocity_mps + glm::cross(body_fixed_frame.omega_inertial_radps, r_rel_m);
     }
 
-    // Local NED frame (north-east-down) attached to the body surface at a given geodetic location.
-    // Returned as a RotatingFrame:
-    // - origin_*: inertial position/velocity of the surface point
-    // - ex_i = North, ey_i = East, ez_i = Down (all expressed in inertial coordinates)
-    // - omega_inertial_radps matches the body's spin (so inertial_state_to_frame accounts for non-inertial terms)
+    /**
+     * @brief Construct a local NED (north-east-down) frame at a geodetic location on the body's surface.
+     *
+     * Returned as a RotatingFrame:
+     * - origin: inertial position/velocity of the surface point
+     * - axes: `ex_i = North`, `ey_i = East`, `ez_i = Down` (all expressed in inertial coordinates)
+     * - `omega_inertial_radps` matches the body's spin so `inertial_state_to_frame` accounts for non-inertial terms
+     *
+     * @return NED frame if inputs are valid; `std::nullopt` otherwise.
+     */
     inline std::optional<RotatingFrame> make_ned_frame(const RotatingFrame &body_fixed_frame,
                                                        const GeodeticCoord &coord,
                                                        const double body_radius_m)
@@ -124,4 +159,3 @@ namespace orbitsim
     }
 
 } // namespace orbitsim
-

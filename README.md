@@ -14,3 +14,6 @@ Assumptions / conventions:
 - Frame: inertial barycentric
 - Angles: radians
 - Rotation: fixed spin axis + constant spin rate (no torques)
+
+## Usage
+See [docs/usage.md](docs/USAGE.md).

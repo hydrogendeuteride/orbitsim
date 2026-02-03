@@ -8,22 +8,36 @@
 
 namespace orbitsim
 {
+    /** @brief Options for Kepler propagator Newton iteration. */
     struct KeplerOptions
     {
-        int max_iterations{64};
-        double abs_tolerance{1e-12};
+        int max_iterations{64};       ///< Maximum Newton iterations
+        double abs_tolerance{1e-12};  ///< Convergence tolerance
     };
 
+    /** @brief Result of Kepler propagation. */
     struct KeplerStepResult
     {
         Vec3 position_m{0.0, 0.0, 0.0};
         Vec3 velocity_mps{0.0, 0.0, 0.0};
-        bool converged{false};
-        int iterations{0};
+        bool converged{false};  ///< True if Newton iteration converged
+        int iterations{0};      ///< Number of iterations used
     };
 
-    // Propagates a two-body orbit under a point-mass gravity field with parameter mu [m^3/s^2]
-    // using universal variables (works for elliptic/hyperbolic/parabolic cases).
+    /**
+     * @brief Propagate two-body orbit using universal variable formulation.
+     *
+     * Analytically propagates position and velocity under point-mass gravity.
+     * Works for all orbit types (elliptic, parabolic, hyperbolic) without
+     * special-casing. Uses Newton iteration to solve Kepler's equation.
+     *
+     * @param mu_m3_s2 Gravitational parameter (G*M) of the central body
+     * @param r0_m Initial position relative to central body
+     * @param v0_mps Initial velocity relative to central body
+     * @param dt_s Time to propagate (can be negative for backward propagation)
+     * @param opt Solver options
+     * @return Propagated state with convergence info
+     */
     inline KeplerStepResult propagate_kepler_universal(const double mu_m3_s2, const Vec3 &r0_m, const Vec3 &v0_mps,
                                                        const double dt_s, const KeplerOptions &opt = {})
     {
@@ -122,6 +136,7 @@ namespace orbitsim
         return out;
     }
 
+    /** @brief Overload accepting State instead of separate position/velocity. */
     inline KeplerStepResult propagate_kepler_universal(const double mu_m3_s2, const State &in, const double dt_s,
                                                        const KeplerOptions &opt = {})
     {

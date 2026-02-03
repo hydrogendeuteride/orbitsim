@@ -10,26 +10,32 @@
 namespace orbitsim
 {
 
-    // -------------------------------------------------------------------------
-    // Generic rotating/translating frame relative to the library's inertial frame.
-    //
-    // Convention:
-    // - Basis vectors ex_i/ey_i/ez_i are expressed in inertial coordinates (orthonormal).
-    // - omega_inertial_radps is the frame angular velocity expressed in inertial coords.
-    // - Transforming inertial -> frame applies the non-inertial velocity term: v' = R^T v - ω'×r'
-    // -------------------------------------------------------------------------
-
+    /**
+     * @brief Rigid translating + rotating coordinate frame relative to the library inertial frame.
+     *
+     * Convention:
+     * - Basis vectors `ex_i/ey_i/ez_i` are expressed in inertial coordinates (orthonormal).
+     * - `omega_inertial_radps` is the frame angular velocity expressed in inertial coordinates.
+     * - Inertial -> frame for velocities applies the non-inertial term: `v_f = R^T v_i - ω_f × r_f`.
+     */
     struct RotatingFrame
     {
+        /// Frame origin position expressed in inertial coordinates.
         Vec3 origin_position_m{0.0, 0.0, 0.0};
+        /// Frame origin velocity expressed in inertial coordinates.
         Vec3 origin_velocity_mps{0.0, 0.0, 0.0};
 
+        /// Frame X-axis expressed in inertial coordinates.
         Vec3 ex_i{1.0, 0.0, 0.0};
+        /// Frame Y-axis expressed in inertial coordinates.
         Vec3 ey_i{0.0, 1.0, 0.0};
+        /// Frame Z-axis expressed in inertial coordinates.
         Vec3 ez_i{0.0, 0.0, 1.0};
 
+        /// Frame angular velocity expressed in inertial coordinates.
         Vec3 omega_inertial_radps{0.0, 0.0, 0.0};
 
+        /// @brief Returns true if all frame fields are finite.
         inline bool valid() const
         {
             const auto finite3 = [](const Vec3 &v) {
@@ -61,6 +67,16 @@ namespace orbitsim
         return frame.origin_position_m + frame_vector_to_inertial(frame, pos_frame_m);
     }
 
+    /**
+     * @brief Transform a full state from inertial to a rotating/translating frame.
+     *
+     * Applies translation/rotation for position, and applies the non-inertial velocity correction
+     * `v_f = R^T (v_i - v_origin) - ω_f × r_f`.
+     *
+     * @param state_in State expressed in inertial coordinates.
+     * @param frame Target frame definition (basis and angular velocity).
+     * @return Equivalent state expressed in the target frame.
+     */
     inline State inertial_state_to_frame(const State &state_in, const RotatingFrame &frame)
     {
         State out = state_in;
@@ -77,6 +93,16 @@ namespace orbitsim
         return out;
     }
 
+    /**
+     * @brief Transform a full state from a rotating/translating frame to inertial.
+     *
+     * Applies translation/rotation for position, and inverts the non-inertial correction
+     * `v_i = v_origin + R (v_f + ω_f × r_f)`.
+     *
+     * @param state_frame State expressed in the rotating frame.
+     * @param frame Source frame definition (basis and angular velocity).
+     * @return Equivalent state expressed in inertial coordinates.
+     */
     inline State frame_state_to_inertial(const State &state_frame, const RotatingFrame &frame)
     {
         State out = state_frame;
@@ -137,6 +163,7 @@ namespace orbitsim
         return make_body_centered_inertial_frame(body.state);
     }
 
+    /// @brief Body-centered inertial frame at time `t_s` (uses ephemeris if available).
     inline RotatingFrame make_body_centered_inertial_frame_at(const CelestialEphemeris &eph, const MassiveBody &body,
                                                               const double t_s)
     {
@@ -157,6 +184,13 @@ namespace orbitsim
     // - ey_i: completes right-handed basis
     // -------------------------------------------------------------------------
 
+    /**
+     * @brief Rotate vector about a unit axis by an angle (Rodrigues' rotation formula).
+     *
+     * @param v Vector to rotate.
+     * @param axis_unit Rotation axis (must be unit length).
+     * @param angle_rad Right-hand rotation angle about `axis_unit`.
+     */
     inline Vec3 rotate_about_axis(const Vec3 &v, const Vec3 &axis_unit, const double angle_rad)
     {
         const double c = std::cos(angle_rad);
@@ -164,6 +198,17 @@ namespace orbitsim
         return v * c + glm::cross(axis_unit, v) * s + axis_unit * (glm::dot(axis_unit, v) * (1.0 - c));
     }
 
+    /**
+     * @brief Construct a deterministic body-fixed frame from the state's spin axis/angle/rate.
+     *
+     * The basis is constructed as:
+     * - `ez_i`: spin axis (in inertial coords)
+     * - `ex_i`: "prime meridian" reference perpendicular to `ez_i`, rotated by `angle_rad` about `ez_i`
+     * - `ey_i`: completes a right-handed orthonormal basis
+     *
+     * Returns `std::nullopt` if the spin axis is not valid/finite or the basis construction becomes
+     * degenerate (e.g., near-zero perpendicular component).
+     */
     inline std::optional<RotatingFrame> make_body_fixed_frame(const State &body_inertial_state)
     {
         const Vec3 axis = normalized_or(body_inertial_state.spin.axis, Vec3{0.0, 0.0, 0.0});
@@ -219,6 +264,7 @@ namespace orbitsim
         return make_body_fixed_frame(body.state);
     }
 
+    /// @brief Body-fixed frame at time `t_s` (uses ephemeris if available).
     inline std::optional<RotatingFrame> make_body_fixed_frame_at(const CelestialEphemeris &eph, const MassiveBody &body,
                                                                  const double t_s)
     {
@@ -238,6 +284,17 @@ namespace orbitsim
     // - omega: instantaneous frame angular velocity ω = (r×v)/|r|^2
     // -------------------------------------------------------------------------
 
+    /**
+     * @brief Construct a spacecraft-centered LVLH frame relative to a primary body.
+     *
+     * Uses relative position/velocity `r = r_sc - r_primary` and `v = v_sc - v_primary`:
+     * - `ex_i`: +R (radial), along `r`
+     * - `ez_i`: +N (orbit normal), along `r×v`
+     * - `ey_i`: completes right-handed basis (approximately +T, prograde)
+     * - `omega_inertial_radps`: instantaneous angular velocity `ω = (r×v)/|r|^2`
+     *
+     * Returns `std::nullopt` for degenerate relative geometry (near-zero `|r|` or `|r×v|`).
+     */
     inline std::optional<RotatingFrame> make_lvlh_frame(const State &primary_state_in, const State &sc_state_in)
     {
         const Vec3 r_rel_m = sc_state_in.position_m - primary_state_in.position_m;
