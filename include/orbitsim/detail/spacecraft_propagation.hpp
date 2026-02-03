@@ -11,6 +11,7 @@
 namespace orbitsim::detail
 {
 
+    /** @brief Extract State from each MassiveBody into a vector. */
     inline void snapshot_states(const std::vector<MassiveBody> &massive, std::vector<State> *out)
     {
         if (out == nullptr)
@@ -25,6 +26,21 @@ namespace orbitsim::detail
         }
     }
 
+    /**
+     * @brief Compute gravitational acceleration at a point from all massive bodies.
+     *
+     * Queries body positions from the ephemeris at time t_s, then sums
+     * contributions using Newton's law with optional softening.
+     *
+     * @tparam EphemerisLike Type with body_position_at(index, t_s) method
+     * @param eph Ephemeris providing body positions at arbitrary times
+     * @param bodies Massive bodies (for mass values)
+     * @param G Gravitational constant
+     * @param softening_length_m Softening to avoid singularities
+     * @param t_s Evaluation time
+     * @param pos_m Position at which to compute acceleration
+     * @return Total gravitational acceleration (m/s^2)
+     */
     template<class EphemerisLike>
     inline Vec3 gravity_accel_mps2(const EphemerisLike &eph, const std::vector<MassiveBody> &bodies, const double G,
                                    const double softening_length_m, const double t_s, const Vec3 &pos_m)
@@ -52,6 +68,29 @@ namespace orbitsim::detail
         return a;
     }
 
+    /**
+     * @brief Propagate a spacecraft through a precomputed ephemeris segment.
+     *
+     * Integrates spacecraft motion under:
+     * - Gravitational attraction from all massive bodies (via ephemeris lookup)
+     * - Thrust from active burns in the maneuver plan (in RTN frame)
+     * - Instantaneous impulse maneuvers at scheduled times
+     *
+     * Automatically subdivides at burn boundaries and handles propellant depletion.
+     * Backward integration (dt_s < 0) is gravity-only (no maneuvers).
+     *
+     * @tparam EphemerisLike Type providing body_position_at(index, t_s)
+     * @param sc0 Initial spacecraft state
+     * @param bodies Massive bodies (for mass and ID lookup)
+     * @param eph Ephemeris for body position interpolation
+     * @param plan Scheduled burns and impulses
+     * @param gravitational_constant G constant
+     * @param softening_length_m Softening length
+     * @param spacecraft_integrator DOPRI5 options
+     * @param t0_s Start time
+     * @param dt_s Integration interval (can be negative)
+     * @return Updated spacecraft with new state and reduced propellant
+     */
     template<class EphemerisLike>
     inline Spacecraft propagate_spacecraft_in_ephemeris(
             const Spacecraft &sc0, const std::vector<MassiveBody> &bodies, const EphemerisLike &eph,
