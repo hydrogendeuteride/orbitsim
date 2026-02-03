@@ -11,14 +11,26 @@
 
 namespace orbitsim
 {
+    /**
+     * @brief Single time-segment of precomputed massive body states.
+     *
+     * Stores start and end states for all bodies over interval [t0_s, t0_s + dt_s].
+     * Interpolates using cubic Hermite to get smooth position/velocity at any time.
+     */
     class CelestialEphemerisSegment
     {
     public:
-        double t0_s{0.0};
-        double dt_s{0.0};
-        std::vector<State> start{};
-        std::vector<State> end{};
+        double t0_s{0.0};            ///< Start time of this segment
+        double dt_s{0.0};            ///< Duration of this segment
+        std::vector<State> start{};  ///< Body states at t0_s
+        std::vector<State> end{};    ///< Body states at t0_s + dt_s
 
+        /**
+         * @brief Interpolate body state at arbitrary time within this segment.
+         *
+         * Uses Hermite interpolation for position/velocity, linear for spin angle.
+         * Times outside [t0_s, t0_s + dt_s] are clamped to segment boundaries.
+         */
         inline State body_state_at(const std::size_t body_index, const double t_s) const
         {
             State out{};
@@ -58,15 +70,23 @@ namespace orbitsim
         }
     };
 
+    /**
+     * @brief Piecewise ephemeris for all massive bodies over a time span.
+     *
+     * Contains multiple contiguous segments; binary search finds the correct
+     * segment for a given query time. Used for trajectory prediction without
+     * re-running full N-body simulation.
+     */
     class CelestialEphemeris
     {
     public:
-        std::vector<CelestialEphemerisSegment> segments{};
-        std::vector<BodyId> body_ids{};
-        std::unordered_map<BodyId, std::size_t> body_id_to_index{};
+        std::vector<CelestialEphemerisSegment> segments{};            ///< Contiguous time segments
+        std::vector<BodyId> body_ids{};                               ///< Body IDs in segment order
+        std::unordered_map<BodyId, std::size_t> body_id_to_index{};   ///< Fast ID -> index lookup
 
         inline bool empty() const { return segments.empty(); }
 
+        /** @brief Set body IDs and rebuild the ID-to-index lookup table. */
         inline void set_body_ids(std::vector<BodyId> ids)
         {
             body_ids = std::move(ids);
@@ -78,6 +98,7 @@ namespace orbitsim
             }
         }
 
+        /** @brief Look up array index for a body ID. Returns false if not found. */
         inline bool body_index_for_id(const BodyId id, std::size_t *out_index) const
         {
             if (out_index == nullptr)
@@ -113,6 +134,11 @@ namespace orbitsim
             return last.t0_s + last.dt_s;
         }
 
+        /**
+         * @brief Query body state at any time, finding correct segment via binary search.
+         *
+         * Times before first segment clamp to first; times after last clamp to last.
+         */
         inline State body_state_at(const std::size_t body_index, const double t_s) const
         {
             State out{};
