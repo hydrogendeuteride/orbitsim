@@ -78,7 +78,7 @@ namespace orbitsim
             return id;
         }
 
-        BodyId add_body(MassiveBody body)
+        BodyHandle create_body(MassiveBody body)
         {
             if (body.id == kInvalidBodyId)
             {
@@ -86,34 +86,22 @@ namespace orbitsim
             }
             if (body_id_to_index_.contains(body.id))
             {
-                return kInvalidBodyId;
+                return BodyHandle{};
             }
 
             body_id_to_index_[body.id] = massive_.size();
             massive_.push_back(std::move(body));
-            return massive_.back().id;
-        }
-
-        BodyId add_body_with_id(const BodyId id, MassiveBody body)
-        {
-            if (id == kInvalidBodyId)
-            {
-                return kInvalidBodyId;
-            }
-            body.id = id;
-            return add_body(std::move(body));
-        }
-
-        BodyHandle create_body(MassiveBody body)
-        {
-            const BodyId id = add_body(std::move(body));
-            return BodyHandle{.id = id};
+            return BodyHandle{.id = massive_.back().id};
         }
 
         BodyHandle create_body_with_id(const BodyId id, MassiveBody body)
         {
-            const BodyId out = add_body_with_id(id, std::move(body));
-            return BodyHandle{.id = out};
+            if (id == kInvalidBodyId)
+            {
+                return BodyHandle{};
+            }
+            body.id = id;
+            return create_body(std::move(body));
         }
 
         MassiveBody *body_by_id(const BodyId id)
@@ -175,7 +163,7 @@ namespace orbitsim
             return id;
         }
 
-        SpacecraftId add_spacecraft(Spacecraft sc)
+        SpacecraftHandle create_spacecraft(Spacecraft sc)
         {
             if (sc.id == kInvalidSpacecraftId || sc.id == kAllSpacecraft)
             {
@@ -183,34 +171,22 @@ namespace orbitsim
             }
             if (spacecraft_id_to_index_.contains(sc.id))
             {
-                return kInvalidSpacecraftId;
+                return SpacecraftHandle{};
             }
 
             spacecraft_id_to_index_[sc.id] = spacecraft_.size();
             spacecraft_.push_back(std::move(sc));
-            return spacecraft_.back().id;
-        }
-
-        SpacecraftId add_spacecraft_with_id(const SpacecraftId id, Spacecraft sc)
-        {
-            if (id == kInvalidSpacecraftId || id == kAllSpacecraft)
-            {
-                return kInvalidSpacecraftId;
-            }
-            sc.id = id;
-            return add_spacecraft(std::move(sc));
-        }
-
-        SpacecraftHandle create_spacecraft(Spacecraft sc)
-        {
-            const SpacecraftId id = add_spacecraft(std::move(sc));
-            return SpacecraftHandle{.id = id};
+            return SpacecraftHandle{.id = spacecraft_.back().id};
         }
 
         SpacecraftHandle create_spacecraft_with_id(const SpacecraftId id, Spacecraft sc)
         {
-            const SpacecraftId out = add_spacecraft_with_id(id, std::move(sc));
-            return SpacecraftHandle{.id = out};
+            if (id == kInvalidSpacecraftId || id == kAllSpacecraft)
+            {
+                return SpacecraftHandle{};
+            }
+            sc.id = id;
+            return create_spacecraft(std::move(sc));
         }
 
         bool has_spacecraft(const SpacecraftId id) const { return spacecraft_id_to_index_.contains(id); }

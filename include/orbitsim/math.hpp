@@ -24,6 +24,16 @@ namespace orbitsim
 
     inline double clamp01(const double x) { return std::clamp(x, 0.0, 1.0); }
 
+    /**
+     * @brief Cubic Hermite interpolation for position between two endpoints.
+     * @param p0 Start position
+     * @param v0_mps Velocity at start
+     * @param p1 End position
+     * @param v1_mps Velocity at end
+     * @param dt_s Time span of the interval (p0 to p1)
+     * @param tau01 Normalized parameter in [0,1]; clamped internally
+     * @return Interpolated position
+     */
     inline Vec3 hermite_position(const Vec3 &p0, const Vec3 &v0_mps, const Vec3 &p1, const Vec3 &v1_mps,
                                  const double dt_s, const double tau01)
     {
@@ -40,6 +50,16 @@ namespace orbitsim
         return (h00 * p0) + (h10 * (h * v0_mps)) + (h01 * p1) + (h11 * (h * v1_mps));
     }
 
+    /**
+     * @brief Derivative of Hermite interpolation, giving velocity at tau01.
+     * @param p0 Start position
+     * @param v0_mps Velocity at start
+     * @param p1 End position
+     * @param v1_mps Velocity at end
+     * @param dt_s Time span of the interval
+     * @param tau01 Normalized parameter in [0,1]
+     * @return Interpolated velocity (m/s)
+     */
     inline Vec3 hermite_velocity_mps(const Vec3 &p0, const Vec3 &v0_mps, const Vec3 &p1, const Vec3 &v1_mps,
                                      const double dt_s, const double tau01)
     {
@@ -61,13 +81,20 @@ namespace orbitsim
         return dp_dtau / h;
     }
 
+    /** @brief Radial-Tangential-Normal frame basis vectors. */
     struct RtnFrame
     {
-        Vec3 R{1.0, 0.0, 0.0};
-        Vec3 T{0.0, 1.0, 0.0};
-        Vec3 N{0.0, 0.0, 1.0};
+        Vec3 R{1.0, 0.0, 0.0}; ///< Radial (away from primary)
+        Vec3 T{0.0, 1.0, 0.0}; ///< Tangential (in orbital plane, roughly velocity direction)
+        Vec3 N{0.0, 0.0, 1.0}; ///< Normal (angular momentum direction)
     };
 
+    /**
+     * @brief Compute RTN frame from relative position and velocity.
+     *
+     * R = r_hat, N = h_hat (angular momentum), T = N x R.
+     * Handles degenerate cases (rectilinear, zero velocity) gracefully.
+     */
     inline RtnFrame compute_rtn_frame(const Vec3 &r_rel_m, const Vec3 &v_rel_mps)
     {
         RtnFrame f;
@@ -131,6 +158,13 @@ namespace orbitsim
         bool valid{false};
     };
 
+    /**
+     * @brief Convert true anomaly to eccentric/hyperbolic and mean anomaly.
+     * @param e Eccentricity (must be >= 0)
+     * @param true_anomaly_rad True anomaly in radians
+     * @return Anomaly values; check `elliptic` or `hyperbolic` flag for orbit type.
+     *         Parabolic (e~1) returns invalid result.
+     */
     inline KeplerAnomalyResult kepler_anomalies_from_true_anomaly(const double e, const double true_anomaly_rad)
     {
         KeplerAnomalyResult out;
@@ -177,6 +211,16 @@ namespace orbitsim
         return out;
     }
 
+    /**
+     * @brief Compute classical orbital elements from relative state vector.
+     *
+     * Uses inertial Z-axis as reference for inclination and RAAN.
+     *
+     * @param mu_m3_s2 Gravitational parameter (G*M) of the primary
+     * @param r_rel_m Position relative to primary (m)
+     * @param v_rel_mps Velocity relative to primary (m/s)
+     * @return Orbital elements; check individual fields for validity.
+     */
     inline OrbitalElements orbital_elements_from_relative_state(const double mu_m3_s2, const Vec3 &r_rel_m,
                                                                 const Vec3 &v_rel_mps)
     {
@@ -260,6 +304,16 @@ namespace orbitsim
         return el;
     }
 
+    /**
+     * @brief Compute orbital elements using a custom reference axis for inclination.
+     *
+     * Useful when the primary's spin axis differs from the inertial Z-axis.
+     *
+     * @param mu_m3_s2 Gravitational parameter
+     * @param r_rel_m Position relative to primary
+     * @param v_rel_mps Velocity relative to primary
+     * @param ref_axis_unit_i Reference axis (e.g., primary's spin axis) in inertial frame
+     */
     inline OrbitalElements orbital_elements_from_relative_state_about_axis(const double mu_m3_s2, const Vec3 &r_rel_m,
                                                                            const Vec3 &v_rel_mps,
                                                                            const Vec3 &ref_axis_unit_i)
@@ -375,21 +429,24 @@ namespace orbitsim
     inline OrbitalElements orbital_elements_from_state(const double mu_m3_s2, const State &primary_state_in,
                                                        const State &sc_state_in)
     {
-        return orbital_elements_from_relative_state(mu_m3_s2,
-                                                    sc_state_in.position_m - primary_state_in.position_m,
+        return orbital_elements_from_relative_state(mu_m3_s2, sc_state_in.position_m - primary_state_in.position_m,
                                                     sc_state_in.velocity_mps - primary_state_in.velocity_mps);
     }
 
     inline OrbitalElements orbital_elements_from_state_about_axis(const double mu_m3_s2, const State &primary_state_in,
-                                                                  const State &sc_state_in,
-                                                                  const Vec3 &ref_axis_unit_i)
+                                                                  const State &sc_state_in, const Vec3 &ref_axis_unit_i)
     {
-        return orbital_elements_from_relative_state_about_axis(mu_m3_s2,
-                                                              sc_state_in.position_m - primary_state_in.position_m,
-                                                              sc_state_in.velocity_mps - primary_state_in.velocity_mps,
-                                                              ref_axis_unit_i);
+        return orbital_elements_from_relative_state_about_axis(
+                mu_m3_s2, sc_state_in.position_m - primary_state_in.position_m,
+                sc_state_in.velocity_mps - primary_state_in.velocity_mps, ref_axis_unit_i);
     }
 
+    /**
+     * @brief Convert orbital elements back to Cartesian state vector.
+     *
+     * Inverse of orbital_elements_from_relative_state. Returns position/velocity
+     * relative to primary in inertial frame.
+     */
     inline State relative_state_from_orbital_elements(const double mu_m3_s2, const OrbitalElements &el)
     {
         State out{};
@@ -509,6 +566,12 @@ namespace orbitsim
         bool valid{false};
     };
 
+    /**
+     * @brief Compute periapsis and apoapsis positions from state.
+     *
+     * For hyperbolic orbits, only periapsis is valid (has_apoapsis = false).
+     * For near-circular orbits, periapsis direction defaults to current position.
+     */
     inline OrbitApsides apsides_from_relative_state(const double mu_m3_s2, const Vec3 &r_rel_m, const Vec3 &v_rel_mps)
     {
         OrbitApsides out;
@@ -575,8 +638,7 @@ namespace orbitsim
     inline OrbitApsides apsides_from_state(const double mu_m3_s2, const State &primary_state_in,
                                            const State &sc_state_in)
     {
-        OrbitApsides out = apsides_from_relative_state(mu_m3_s2,
-                                                       sc_state_in.position_m - primary_state_in.position_m,
+        OrbitApsides out = apsides_from_relative_state(mu_m3_s2, sc_state_in.position_m - primary_state_in.position_m,
                                                        sc_state_in.velocity_mps - primary_state_in.velocity_mps);
         if (!out.valid)
         {
@@ -587,6 +649,13 @@ namespace orbitsim
         return out;
     }
 
+    /**
+     * @brief Stumpff function C(z) used in universal variable formulation.
+     *
+     * C(z) = (1 - cos(sqrt(z))) / z  for z > 0 (elliptic)
+     * C(z) = (cosh(sqrt(-z)) - 1) / (-z)  for z < 0 (hyperbolic)
+     * Series expansion near z = 0.
+     */
     inline double stumpff_C(const double z)
     {
         if (std::abs(z) < 1e-8)
@@ -604,6 +673,13 @@ namespace orbitsim
         return (std::cosh(sz) - 1.0) / (-z);
     }
 
+    /**
+     * @brief Stumpff function S(z) used in universal variable formulation.
+     *
+     * S(z) = (sqrt(z) - sin(sqrt(z))) / z^(3/2)  for z > 0 (elliptic)
+     * S(z) = (sinh(sqrt(-z)) - sqrt(-z)) / (-z)^(3/2)  for z < 0 (hyperbolic)
+     * Series expansion near z = 0.
+     */
     inline double stumpff_S(const double z)
     {
         if (std::abs(z) < 1e-8)

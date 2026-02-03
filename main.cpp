@@ -118,7 +118,7 @@ int main()
     // -------------------------------------------------------------------------
 
     // Reentry/impact probe near Earth (guaranteed to cross atmosphere + impact soon).
-    SpacecraftId sc_reentry_id = kInvalidSpacecraftId;
+    GameSimulation::SpacecraftHandle sc_reentry_h{};
     {
         const double alt_m = 120'000.0;
         const Vec3 r0 = Vec3{earth_ptr->radius_m + alt_m, 0.0, 0.0};
@@ -128,11 +128,11 @@ int main()
                 .dry_mass_kg = 100.0,
                 .prop_mass_kg = 0.0,
         };
-        sc_reentry_id = sim.add_spacecraft(std::move(sc_reentry));
+        sc_reentry_h = sim.create_spacecraft(std::move(sc_reentry));
     }
 
     // Moon SOI probe: starts just outside Moon SOI and drifts inward, triggering SOI enter event.
-    SpacecraftId sc_moon_soi_id = kInvalidSpacecraftId;
+    GameSimulation::SpacecraftHandle sc_moon_soi_h{};
     {
         const Vec3 r0 = Vec3{moon_ptr->soi_radius_m + 1.0e6, 0.0, 0.0};
         const Vec3 v0 = Vec3{-200.0, 0.0, 0.0};
@@ -141,7 +141,7 @@ int main()
                 .dry_mass_kg = 100.0,
                 .prop_mass_kg = 0.0,
         };
-        sc_moon_soi_id = sim.add_spacecraft(std::move(sc_moon_soi));
+        sc_moon_soi_h = sim.create_spacecraft(std::move(sc_moon_soi));
     }
 
     // Injection burn: prograde in RTN (Earth primary).
@@ -248,13 +248,13 @@ int main()
 
     std::vector<TrajectorySample> sc_reentry_rel_earth;
     std::vector<TrajectorySample> sc_moon_soi_rel_moon;
-    if (sc_reentry_id != kInvalidSpacecraftId)
+    if (sc_reentry_h.valid())
     {
-        sc_reentry_rel_earth = predict_spacecraft_trajectory(sim, eph, sc_reentry_id, reentry_short_earth);
+        sc_reentry_rel_earth = predict_spacecraft_trajectory(sim, eph, sc_reentry_h.id, reentry_short_earth);
     }
-    if (sc_moon_soi_id != kInvalidSpacecraftId)
+    if (sc_moon_soi_h.valid())
     {
-        sc_moon_soi_rel_moon = predict_spacecraft_trajectory(sim, eph, sc_moon_soi_id, moon_soi_short_moon);
+        sc_moon_soi_rel_moon = predict_spacecraft_trajectory(sim, eph, sc_moon_soi_h.id, moon_soi_short_moon);
     }
 
     // -------------------------------------------------------------------------
@@ -301,10 +301,15 @@ int main()
         }
     }
 
-    SpacecraftId sc_lambert_id = kInvalidSpacecraftId;
+    GameSimulation::SpacecraftHandle sc_lambert_h{};
     if (best.has_value())
     {
-        Spacecraft sc_lambert = *sim.spacecraft_by_id(sc_id);
+        const Spacecraft *base_sc = sim.spacecraft_by_id(sc_id);
+        if (base_sc == nullptr)
+        {
+            return 1;
+        }
+        Spacecraft sc_lambert = *base_sc;
         sc_lambert.id = kInvalidSpacecraftId;
         sc_lambert.engines.clear();
         sc_lambert.prop_mass_kg = 0.0;
@@ -312,7 +317,7 @@ int main()
         sc_lambert.state.position_m = earth_at_depart.position_m + r1_rel_earth_m;
         sc_lambert.state.velocity_mps = earth_at_depart.velocity_mps + best->v1_mps;
 
-        sc_lambert_id = sim.add_spacecraft(std::move(sc_lambert));
+        sc_lambert_h = sim.create_spacecraft(std::move(sc_lambert));
     }
 
     // Lambert output sections (custom parser in visualize_lambert_transfer.py)
@@ -336,7 +341,7 @@ int main()
         std::printf("best_dv_mps,nan\n");
     }
 
-    if (sc_lambert_id != kInvalidSpacecraftId)
+    if (sc_lambert_h.valid())
     {
         const auto lam_opt_traj = trajectory_options()
                 .duration(dt_transfer_s)
@@ -346,7 +351,7 @@ int main()
                 .origin(earth_id);
 
         const std::vector<TrajectorySample> lam_sc_rel_earth =
-                predict_spacecraft_trajectory(sim, eph, sc_lambert_id, lam_opt_traj);
+                predict_spacecraft_trajectory(sim, eph, sc_lambert_h.id, lam_opt_traj);
         const std::vector<TrajectorySample> lam_moon_rel_earth =
                 predict_body_trajectory(sim, eph, moon_id, lam_opt_traj);
 
@@ -522,11 +527,11 @@ int main()
     }
 
     // Event probe outputs (small CSV blocks)
-    if (sc_reentry_id != kInvalidSpacecraftId)
+    if (sc_reentry_h.valid())
     {
         std::printf("events_reentry_sc\n");
         const std::vector<Event> ev_reentry =
-                predict_spacecraft_events(sim, eph, sc_reentry_id, reentry_short_inertial);
+                predict_spacecraft_events(sim, eph, sc_reentry_h.id, reentry_short_inertial);
         for (const auto &e: ev_reentry)
         {
             std::printf("%.6f,%s,%u,%s\n",
@@ -550,11 +555,11 @@ int main()
         }
     }
 
-    if (sc_moon_soi_id != kInvalidSpacecraftId)
+    if (sc_moon_soi_h.valid())
     {
         std::printf("events_moon_soi_sc\n");
         const std::vector<Event> ev_soi =
-                predict_spacecraft_events(sim, eph, sc_moon_soi_id, moon_soi_short_inertial);
+                predict_spacecraft_events(sim, eph, sc_moon_soi_h.id, moon_soi_short_inertial);
         for (const auto &e: ev_soi)
         {
             std::printf("%.6f,%s,%u,%s\n",
@@ -588,11 +593,11 @@ int main()
 
     // Target plane nodes: crossings of the target spacecraft's current orbit plane about the same primary.
     // (In a KSP-like UI, this is the "AN/DN relative to target orbit" you show in the map view.)
-    if (sc_lambert_id != kInvalidSpacecraftId)
+    if (sc_lambert_h.valid())
     {
         std::printf("target_nodes_sc_to_lambert_earth\n");
         const std::vector<NodeEvent> tgt_nodes =
-                predict_target_plane_nodes(sim, eph, sc_id, sc_lambert_id, earth_id, traj_opt_inertial);
+                predict_target_plane_nodes(sim, eph, sc_id, sc_lambert_h.id, earth_id, traj_opt_inertial);
         for (const auto &n: tgt_nodes)
         {
             std::printf("%.6f,%s\n", n.t_event_s, node_str(n.crossing));
