@@ -161,6 +161,33 @@ if (!ship_h.valid()) {
 SpacecraftId ship_id = ship_h.id;
 ```
 
+### State Setters (Rails/Time-Jump)
+
+For rails or time-jump workflows where states are advanced externally:
+
+- `set_time_s(t)`: Sets the simulation clock without modifying any body/spacecraft states.
+- `set_body_state(id, state)`: Replaces the inertial state of a massive body.
+- `set_spacecraft_state(id, state)`: Replaces the inertial state of a spacecraft; also resets proximity tracking.
+
+```cpp
+// Set simulation time (does not modify body/spacecraft states)
+sim.set_time_s(hours(10.0));
+
+// Set body state
+State new_earth_state = make_state(
+    Vec3{1.5e11, 0.0, 0.0},
+    Vec3{0.0, 29780.0, 0.0}
+);
+bool ok = sim.set_body_state(earth_id, new_earth_state);
+
+// Set spacecraft state
+State new_ship_state = make_state(
+    Vec3{1.5e11 + 7e6, 0.0, 0.0},
+    Vec3{0.0, 29780.0 + 7500.0, 0.0}
+);
+ok = sim.set_spacecraft_state(ship_id, new_ship_state);
+```
+
 ### Running the Simulation
 
 ```cpp
@@ -668,6 +695,37 @@ if (result.converged) {
     Vec3 v_new = result.velocity_mps;
 }
 ```
+
+### SOI-Based Primary Selection (Rails Mode)
+
+For rails/patched-conics timewarp, select the appropriate primary body based on SOI:
+
+```cpp
+#include <orbitsim/soi.hpp>
+
+// Configure SOI switching options
+SoiSwitchOptions soi_opt;
+soi_opt.enter_scale = 1.0;           // Enter SOI at 1.0x radius
+soi_opt.exit_scale = 1.02;           // Exit SOI at 1.02x radius (hysteresis)
+soi_opt.prefer_smallest_soi = true;  // Prefer most local body (moon over planet)
+soi_opt.fallback_to_max_accel = true; // Fall back to max gravitational acceleration
+
+// Select primary body for a spacecraft
+BodyId current_primary = earth_id;
+BodyId new_primary = select_primary_body_id_rails(
+    sim, eph, ship_id, t_s, current_primary, soi_opt
+);
+
+// Or with position directly
+BodyId primary = select_primary_body_id_rails(
+    sim, eph, sc_pos_m, t_s, current_primary, soi_opt
+);
+```
+
+**Behavior:**
+- Immediately switches into smaller/local SOIs (e.g., Earth → Moon)
+- Uses hysteresis when exiting to prevent boundary thrashing
+- Falls back to max-acceleration selection when no SOI contains the spacecraft
 
 ---
 
