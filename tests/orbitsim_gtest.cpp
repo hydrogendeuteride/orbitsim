@@ -143,7 +143,7 @@ TEST(Trajectories, PredictSpacecraftTrajectoryLinearMotion)
     opt.max_samples = 64;
     opt.include_start = true;
     opt.include_end = true;
-    opt.origin_body_id = origin_h;
+    opt.frame = orbitsim::TrajectoryFrameSpec::body_centered_inertial(origin_h);
 
     const std::vector<orbitsim::TrajectorySample> traj = orbitsim::predict_spacecraft_trajectory(sim, sc_h, opt);
     ASSERT_EQ(traj.size(), 11u);
@@ -228,7 +228,7 @@ TEST(Trajectories, BodyTrajectoryRelativeToSelfIsZero)
     opt.sample_dt_s = 1.0;
     opt.celestial_dt_s = 1.0;
     opt.max_samples = 64;
-    opt.origin_body_id = self_h;
+    opt.frame = orbitsim::TrajectoryFrameSpec::body_centered_inertial(self_h);
 
     const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris(sim, opt);
     const std::vector<orbitsim::TrajectorySample> traj = orbitsim::predict_body_trajectory(sim, eph, self_h, opt);

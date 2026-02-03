@@ -421,6 +421,15 @@ auto opts_rel = trajectory_options()
     .build();
 
 auto earth_rel_traj = predict_body_trajectory(sim, eph, earth_id, opts_rel);
+
+// Predict in a synodic (co-rotating) frame (Earth-Moon)
+// Propagation still occurs in inertial; only the returned samples are transformed.
+auto opts_syn = trajectory_options()
+    .duration(days(30.0))
+    .synodic(earth_id, moon_id)
+    .build();
+
+auto ship_syn_traj = predict_spacecraft_trajectory(sim, eph, ship_id, opts_syn);
 ```
 
 ### Predicting Spacecraft Trajectories

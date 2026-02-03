@@ -66,7 +66,7 @@ namespace orbitsim
     }
 
     /// @brief Convert inertial trajectory samples into the time-varying body-centered inertial frame of a body (ECI/BCI).
-    /// @note The input samples must be inertial (i.e., not already offset by TrajectoryOptions::origin_body_id).
+    /// @note The input samples must be inertial (i.e., not already expressed in another frame).
     inline std::vector<TrajectorySample> trajectory_to_body_centered_inertial(const std::vector<TrajectorySample> &samples_in,
                                                                               const CelestialEphemeris &eph,
                                                                               const MassiveBody &body)
@@ -84,7 +84,7 @@ namespace orbitsim
     }
 
     /// @brief Convert inertial trajectory samples into the time-varying body-fixed rotating frame of a body (ECEF).
-    /// @note The input samples must be inertial (i.e., not already offset by TrajectoryOptions::origin_body_id).
+    /// @note The input samples must be inertial (i.e., not already expressed in another frame).
     inline std::vector<TrajectorySample> trajectory_to_body_fixed(const std::vector<TrajectorySample> &samples_in,
                                                                   const CelestialEphemeris &eph,
                                                                   const MassiveBody &body)
@@ -129,7 +129,7 @@ namespace orbitsim
     }
 
     /// @brief Convert inertial trajectory samples into the time-varying synodic frame of bodies (A,B).
-    /// @note The input samples must be inertial (i.e., not already offset by TrajectoryOptions::origin_body_id).
+    /// @note The input samples must be inertial (i.e., not already expressed in another frame).
     inline std::vector<TrajectorySample> trajectory_to_synodic(const std::vector<TrajectorySample> &samples_in,
                                                                const CelestialEphemeris &eph,
                                                                const MassiveBody &body_a,
@@ -152,4 +152,3 @@ namespace orbitsim
     }
 
 } // namespace orbitsim
-
