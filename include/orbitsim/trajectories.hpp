@@ -2,8 +2,8 @@
 
 #include "orbitsim/detail/spacecraft_propagation.hpp"
 #include "orbitsim/events.hpp"
-#include "orbitsim/nodes.hpp"
 #include "orbitsim/game_sim.hpp"
+#include "orbitsim/nodes.hpp"
 #include "orbitsim/time_utils.hpp"
 #include "orbitsim/trajectory_types.hpp"
 #include "orbitsim/types.hpp"
@@ -17,30 +17,31 @@
 namespace orbitsim
 {
 
+    /**
+     * @brief Configuration for trajectory prediction and sampling.
+     *
+     * Controls duration, sample intervals, and coordinate frame for
+     * trajectory prediction functions.
+     */
     struct TrajectoryOptions
     {
-        // Trajectory begins at the simulation's current time t0 = sim.time_s().
-        double duration_s{3600.0};
+        double duration_s{3600.0};  ///< Prediction duration from sim.time_s()
 
-        // If <= 0, it is derived from duration_s / (max_samples - 1).
-        double sample_dt_s{10.0};
+        double sample_dt_s{10.0};   ///< Sample interval; if <= 0, derived from duration/(max_samples-1)
 
-        // If > 0, spacecraft trajectories use this dt instead of sample_dt_s.
-        // This is useful for smooth orbit-line rendering of fast local orbits (e.g. LEO)
-        // while keeping body sampling coarse for long-horizon predictions.
+        /// Spacecraft sample interval; if > 0, overrides sample_dt_s for spacecraft.
+        /// Useful for smooth orbit-line rendering of fast local orbits (e.g. LEO).
         double spacecraft_sample_dt_s{0.0};
 
-        // If > 0, uses this dt to step massive bodies when building a prediction ephemeris. Otherwise uses sample_dt_s
-        // (or the derived sample dt).
+        /// Massive body integration step; if <= 0, uses sample_dt_s.
         double celestial_dt_s{0.0};
 
-        // Hard cap to protect against unbounded allocations.
-        std::size_t max_samples{2048};
+        std::size_t max_samples{2048};  ///< Hard cap to prevent unbounded allocations
 
-        bool include_start{true};
-        bool include_end{true};
+        bool include_start{true};   ///< Include sample at t0
+        bool include_end{true};     ///< Include sample at t0 + duration
 
-        // If set, returned state is relative to this body's state at the same time.
+        /// If set, positions/velocities are relative to this body's state.
         std::optional<BodyId> origin_body_id{};
     };
 
@@ -148,8 +149,7 @@ namespace orbitsim
         }
 
         inline std::optional<State> origin_state_at_(const GameSimulation &sim, const CelestialEphemeris &eph,
-                                                     const std::optional<BodyId> origin_body_id,
-                                                     const double t_s)
+                                                     const std::optional<BodyId> origin_body_id, const double t_s)
         {
             if (!origin_body_id.has_value())
             {
@@ -253,7 +253,8 @@ namespace orbitsim
 
         inline std::vector<TrajectorySample>
         predict_spacecraft_trajectory_from_ephemeris_by_id_(const GameSimulation &sim, const CelestialEphemeris &eph,
-                                                           const SpacecraftId spacecraft_id, const TrajectoryOptions &opt)
+                                                            const SpacecraftId spacecraft_id,
+                                                            const TrajectoryOptions &opt)
         {
             std::vector<TrajectorySample> out;
             if (opt.max_samples == 0)
@@ -324,9 +325,11 @@ namespace orbitsim
             return (e.type == EventType::Impact) && (e.crossing == Crossing::Enter);
         }
 
-        inline std::vector<Event> predict_spacecraft_events_from_ephemeris_by_id_(
-                const GameSimulation &sim, const CelestialEphemeris &eph, const SpacecraftId spacecraft_id,
-                const TrajectoryOptions &traj_opt, const EventOptions &event_opt)
+        inline std::vector<Event> predict_spacecraft_events_from_ephemeris_by_id_(const GameSimulation &sim,
+                                                                                  const CelestialEphemeris &eph,
+                                                                                  const SpacecraftId spacecraft_id,
+                                                                                  const TrajectoryOptions &traj_opt,
+                                                                                  const EventOptions &event_opt)
         {
             std::vector<Event> out;
             if (traj_opt.duration_s <= 0.0 || !std::isfinite(traj_opt.duration_s))
@@ -382,17 +385,12 @@ namespace orbitsim
                     continue;
                 }
 
-                auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s, const double dt_sc_s) -> Spacecraft {
-                    return propagate_spacecraft_in_ephemeris(
-                            sc_start,
-                            sim.massive_bodies(),
-                            seg,
-                            sim.maneuver_plan(),
-                            sim.config().gravitational_constant,
-                            sim.config().softening_length_m,
-                            sim.config().spacecraft_integrator,
-                            t0_s,
-                            dt_sc_s);
+                auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
+                                        const double dt_sc_s) -> Spacecraft {
+                    return propagate_spacecraft_in_ephemeris(sc_start, sim.massive_bodies(), seg, sim.maneuver_plan(),
+                                                             sim.config().gravitational_constant,
+                                                             sim.config().softening_length_m,
+                                                             sim.config().spacecraft_integrator, t0_s, dt_sc_s);
                 };
 
                 while (remaining > 0.0)
@@ -497,14 +495,9 @@ namespace orbitsim
         }
 
         inline std::vector<NodeEvent> predict_plane_nodes_from_ephemeris_by_id_(
-                const GameSimulation &sim,
-                const CelestialEphemeris &eph,
-                const SpacecraftId spacecraft_id,
-                const BodyId primary_body_id,
-                const Vec3 &plane_normal_unit_i,
-                const SpacecraftId target_spacecraft_id,
-                const TrajectoryOptions &traj_opt,
-                const EventOptions &opt)
+                const GameSimulation &sim, const CelestialEphemeris &eph, const SpacecraftId spacecraft_id,
+                const BodyId primary_body_id, const Vec3 &plane_normal_unit_i, const SpacecraftId target_spacecraft_id,
+                const TrajectoryOptions &traj_opt, const EventOptions &opt)
         {
             std::vector<NodeEvent> out;
             if (!(traj_opt.duration_s > 0.0) || !std::isfinite(traj_opt.duration_s))
@@ -564,32 +557,19 @@ namespace orbitsim
                     continue;
                 }
 
-                auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s, const double dt_sc_s) -> Spacecraft {
-                    return propagate_spacecraft_in_ephemeris(
-                            sc_start,
-                            sim.massive_bodies(),
-                            seg,
-                            sim.maneuver_plan(),
-                            sim.config().gravitational_constant,
-                            sim.config().softening_length_m,
-                            sim.config().spacecraft_integrator,
-                            t0_s,
-                            dt_sc_s);
+                auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
+                                        const double dt_sc_s) -> Spacecraft {
+                    return propagate_spacecraft_in_ephemeris(sc_start, sim.massive_bodies(), seg, sim.maneuver_plan(),
+                                                             sim.config().gravitational_constant,
+                                                             sim.config().softening_length_m,
+                                                             sim.config().spacecraft_integrator, t0_s, dt_sc_s);
                 };
 
                 while (remaining > 0.0)
                 {
                     const std::optional<NodeEvent> e = find_earliest_plane_node_in_interval_(
-                            sim.massive_bodies(),
-                            seg,
-                            sc,
-                            t,
-                            remaining,
-                            primary_body_id,
-                            plane_normal_unit_i,
-                            target_spacecraft_id,
-                            opt,
-                            propagate_sc);
+                            sim.massive_bodies(), seg, sc, t, remaining, primary_body_id, plane_normal_unit_i,
+                            target_spacecraft_id, opt, propagate_sc);
 
                     if (!e.has_value())
                     {
@@ -648,18 +628,36 @@ namespace orbitsim
         }
     } // namespace detail
 
+    /**
+     * @brief Build precomputed ephemeris for all massive bodies.
+     *
+     * Steps the N-body simulation forward and stores piecewise-Hermite segments
+     * for efficient interpolation during spacecraft trajectory prediction.
+     */
     inline CelestialEphemeris build_celestial_ephemeris(const GameSimulation &sim, const TrajectoryOptions &opt = {})
     {
         return detail::build_celestial_ephemeris_(sim, opt);
     }
 
-    inline std::vector<TrajectorySample>
-    predict_body_trajectory(const GameSimulation &sim, const BodyId body_id, const TrajectoryOptions &opt = {})
+    /**
+     * @brief Predict future trajectory of a massive body.
+     *
+     * Builds ephemeris internally and samples body positions at regular intervals.
+     * Use the overload with pre-built ephemeris when predicting multiple bodies.
+     */
+    inline std::vector<TrajectorySample> predict_body_trajectory(const GameSimulation &sim, const BodyId body_id,
+                                                                 const TrajectoryOptions &opt = {})
     {
         const CelestialEphemeris eph = detail::build_celestial_ephemeris_(sim, opt);
         return detail::predict_body_trajectory_from_ephemeris_(sim, eph, body_id, opt);
     }
 
+    /**
+     * @brief Predict future trajectory of a spacecraft.
+     *
+     * Propagates spacecraft through precomputed massive body ephemeris,
+     * applying scheduled maneuvers from the simulation's maneuver plan.
+     */
     inline std::vector<TrajectorySample> predict_spacecraft_trajectory(const GameSimulation &sim,
                                                                        const SpacecraftId spacecraft_id,
                                                                        const TrajectoryOptions &opt = {})
@@ -668,22 +666,29 @@ namespace orbitsim
         return detail::predict_spacecraft_trajectory_from_ephemeris_by_id_(sim, eph, spacecraft_id, opt);
     }
 
+    /** @brief Predict body trajectory using pre-built ephemeris. */
     inline std::vector<TrajectorySample> predict_body_trajectory(const GameSimulation &sim,
-                                                                 const CelestialEphemeris &eph,
-                                                                 const BodyId body_id,
+                                                                 const CelestialEphemeris &eph, const BodyId body_id,
                                                                  const TrajectoryOptions &opt = {})
     {
         return detail::predict_body_trajectory_from_ephemeris_(sim, eph, body_id, opt);
     }
 
+    /** @brief Predict spacecraft trajectory using pre-built ephemeris. */
     inline std::vector<TrajectorySample> predict_spacecraft_trajectory(const GameSimulation &sim,
-                                                                 const CelestialEphemeris &eph,
-                                                                 const SpacecraftId spacecraft_id,
-                                                                 const TrajectoryOptions &opt = {})
+                                                                       const CelestialEphemeris &eph,
+                                                                       const SpacecraftId spacecraft_id,
+                                                                       const TrajectoryOptions &opt = {})
     {
         return detail::predict_spacecraft_trajectory_from_ephemeris_by_id_(sim, eph, spacecraft_id, opt);
     }
 
+    /**
+     * @brief Predict future events (SOI crossings, impacts, etc.) for a spacecraft.
+     *
+     * Propagates spacecraft and detects boundary crossings. Returns events
+     * in chronological order. Stops early on terminal events (e.g. impact).
+     */
     inline std::vector<Event> predict_spacecraft_events(const GameSimulation &sim, const CelestialEphemeris &eph,
                                                         const SpacecraftId spacecraft_id, const TrajectoryOptions &opt,
                                                         const EventOptions &event_opt)
@@ -692,9 +697,11 @@ namespace orbitsim
     }
 
     inline std::vector<Event> predict_spacecraft_events(const GameSimulation &sim, const CelestialEphemeris &eph,
-                                                        const SpacecraftId spacecraft_id, const TrajectoryOptions &opt = {})
+                                                        const SpacecraftId spacecraft_id,
+                                                        const TrajectoryOptions &opt = {})
     {
-        return detail::predict_spacecraft_events_from_ephemeris_by_id_(sim, eph, spacecraft_id, opt, sim.config().events);
+        return detail::predict_spacecraft_events_from_ephemeris_by_id_(sim, eph, spacecraft_id, opt,
+                                                                       sim.config().events);
     }
 
     inline std::vector<Event> predict_spacecraft_events(const GameSimulation &sim, const SpacecraftId spacecraft_id,
@@ -708,12 +715,20 @@ namespace orbitsim
                                                         const TrajectoryOptions &opt = {})
     {
         const CelestialEphemeris eph = detail::build_celestial_ephemeris_(sim, opt);
-        return detail::predict_spacecraft_events_from_ephemeris_by_id_(sim, eph, spacecraft_id, opt, sim.config().events);
+        return detail::predict_spacecraft_events_from_ephemeris_by_id_(sim, eph, spacecraft_id, opt,
+                                                                       sim.config().events);
     }
 
+    /**
+     * @brief Predict ascending/descending node crossings through a body's equatorial plane.
+     *
+     * The equatorial plane is defined by the body's spin axis. Useful for
+     * planning inclination change maneuvers.
+     */
     inline std::vector<NodeEvent> predict_equatorial_nodes(const GameSimulation &sim, const CelestialEphemeris &eph,
-                                                           const SpacecraftId spacecraft_id, const BodyId primary_body_id,
-                                                           const TrajectoryOptions &opt, const EventOptions &node_opt)
+                                                           const SpacecraftId spacecraft_id,
+                                                           const BodyId primary_body_id, const TrajectoryOptions &opt,
+                                                           const EventOptions &node_opt)
     {
         const MassiveBody *primary = sim.body_by_id(primary_body_id);
         if (primary == nullptr)
@@ -725,12 +740,13 @@ namespace orbitsim
         {
             return {};
         }
-        return detail::predict_plane_nodes_from_ephemeris_by_id_(
-                sim, eph, spacecraft_id, primary_body_id, *axis, kInvalidSpacecraftId, opt, node_opt);
+        return detail::predict_plane_nodes_from_ephemeris_by_id_(sim, eph, spacecraft_id, primary_body_id, *axis,
+                                                                 kInvalidSpacecraftId, opt, node_opt);
     }
 
     inline std::vector<NodeEvent> predict_equatorial_nodes(const GameSimulation &sim, const CelestialEphemeris &eph,
-                                                           const SpacecraftId spacecraft_id, const BodyId primary_body_id,
+                                                           const SpacecraftId spacecraft_id,
+                                                           const BodyId primary_body_id,
                                                            const TrajectoryOptions &opt = {})
     {
         return predict_equatorial_nodes(sim, eph, spacecraft_id, primary_body_id, opt, sim.config().events);
@@ -745,12 +761,19 @@ namespace orbitsim
     }
 
     inline std::vector<NodeEvent> predict_equatorial_nodes(const GameSimulation &sim, const SpacecraftId spacecraft_id,
-                                                           const BodyId primary_body_id, const TrajectoryOptions &opt = {})
+                                                           const BodyId primary_body_id,
+                                                           const TrajectoryOptions &opt = {})
     {
         const CelestialEphemeris eph = detail::build_celestial_ephemeris_(sim, opt);
         return predict_equatorial_nodes(sim, eph, spacecraft_id, primary_body_id, opt, sim.config().events);
     }
 
+    /**
+     * @brief Predict node crossings through another spacecraft's orbital plane.
+     *
+     * The target plane is defined by the target spacecraft's angular momentum
+     * vector at the current time. Useful for rendezvous plane-change planning.
+     */
     inline std::vector<NodeEvent> predict_target_plane_nodes(const GameSimulation &sim, const CelestialEphemeris &eph,
                                                              const SpacecraftId spacecraft_id,
                                                              const SpacecraftId target_spacecraft_id,
@@ -772,33 +795,40 @@ namespace orbitsim
         {
             return {};
         }
-        return detail::predict_plane_nodes_from_ephemeris_by_id_(
-                sim, eph, spacecraft_id, primary_body_id, *n, target_spacecraft_id, opt, node_opt);
+        return detail::predict_plane_nodes_from_ephemeris_by_id_(sim, eph, spacecraft_id, primary_body_id, *n,
+                                                                 target_spacecraft_id, opt, node_opt);
     }
 
     inline std::vector<NodeEvent> predict_target_plane_nodes(const GameSimulation &sim, const CelestialEphemeris &eph,
                                                              const SpacecraftId spacecraft_id,
                                                              const SpacecraftId target_spacecraft_id,
-                                                             const BodyId primary_body_id, const TrajectoryOptions &opt = {})
+                                                             const BodyId primary_body_id,
+                                                             const TrajectoryOptions &opt = {})
     {
-        return predict_target_plane_nodes(sim, eph, spacecraft_id, target_spacecraft_id, primary_body_id, opt, sim.config().events);
+        return predict_target_plane_nodes(sim, eph, spacecraft_id, target_spacecraft_id, primary_body_id, opt,
+                                          sim.config().events);
     }
 
-    inline std::vector<NodeEvent> predict_target_plane_nodes(const GameSimulation &sim, const SpacecraftId spacecraft_id,
+    inline std::vector<NodeEvent> predict_target_plane_nodes(const GameSimulation &sim,
+                                                             const SpacecraftId spacecraft_id,
                                                              const SpacecraftId target_spacecraft_id,
                                                              const BodyId primary_body_id, const TrajectoryOptions &opt,
                                                              const EventOptions &node_opt)
     {
         const CelestialEphemeris eph = detail::build_celestial_ephemeris_(sim, opt);
-        return predict_target_plane_nodes(sim, eph, spacecraft_id, target_spacecraft_id, primary_body_id, opt, node_opt);
+        return predict_target_plane_nodes(sim, eph, spacecraft_id, target_spacecraft_id, primary_body_id, opt,
+                                          node_opt);
     }
 
-    inline std::vector<NodeEvent> predict_target_plane_nodes(const GameSimulation &sim, const SpacecraftId spacecraft_id,
+    inline std::vector<NodeEvent> predict_target_plane_nodes(const GameSimulation &sim,
+                                                             const SpacecraftId spacecraft_id,
                                                              const SpacecraftId target_spacecraft_id,
-                                                             const BodyId primary_body_id, const TrajectoryOptions &opt = {})
+                                                             const BodyId primary_body_id,
+                                                             const TrajectoryOptions &opt = {})
     {
         const CelestialEphemeris eph = detail::build_celestial_ephemeris_(sim, opt);
-        return predict_target_plane_nodes(sim, eph, spacecraft_id, target_spacecraft_id, primary_body_id, opt, sim.config().events);
+        return predict_target_plane_nodes(sim, eph, spacecraft_id, target_spacecraft_id, primary_body_id, opt,
+                                          sim.config().events);
     }
 
     // -------------------------------------------------------------------------
