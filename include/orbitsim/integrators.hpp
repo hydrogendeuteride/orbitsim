@@ -14,6 +14,7 @@
 namespace orbitsim
 {
 
+    /** @brief Advance spin angle by constant rotation rate over dt_s. */
     inline void advance_spin(SpinState &spin, const double dt_s)
     {
         spin.axis = normalized_or(spin.axis, Vec3{0.0, 1.0, 0.0});
@@ -23,6 +24,17 @@ namespace orbitsim
         }
     }
 
+    /**
+     * @brief Compute gravitational accelerations for all massive bodies.
+     *
+     * Uses pairwise O(N^2) summation with optional softening to avoid
+     * singularities at close approach.
+     *
+     * @param bodies Vector of massive bodies
+     * @param G Gravitational constant (m^3 / kg / s^2)
+     * @param softening_length_m Softening length to prevent division by zero
+     * @param[out] out_acc_mps2 Output accelerations (resized to bodies.size())
+     */
     inline void compute_nbody_accelerations(const std::vector<MassiveBody> &bodies, const double G,
                                             const double softening_length_m, std::vector<Vec3> &out_acc_mps2)
     {
@@ -52,6 +64,7 @@ namespace orbitsim
 
     namespace detail
     {
+        /** @brief Single velocity-Verlet (leapfrog) step for N-body integration. */
         inline void velocity_verlet_step(std::vector<MassiveBody> &bodies, const double dt_s, const double G,
                                          const double softening_length_m)
         {
@@ -80,6 +93,13 @@ namespace orbitsim
         }
     } // namespace detail
 
+    /**
+     * @brief 4th-order symplectic integrator step for massive bodies.
+     *
+     * Uses Yoshida composition: three velocity-Verlet substeps with
+     * specially chosen coefficients to achieve 4th-order accuracy while
+     * preserving symplectic structure (energy conservation over long times).
+     */
     inline void symplectic4_step(std::vector<MassiveBody> &bodies, const double dt_s, const double G,
                                  const double softening_length_m)
     {
@@ -94,25 +114,30 @@ namespace orbitsim
         detail::velocity_verlet_step(bodies, w1 * dt_s, G, softening_length_m);
     }
 
+    /** @brief Options for the DOPRI5 adaptive integrator. */
     struct DOPRI5Options
     {
-        bool adaptive{true};
-        double abs_tol{1e-3}; // meters or (m/s) depending on component (scaled internally)
-        double rel_tol{1e-9};
-        int max_substeps{64};
-        // If > 0, clamps the internal step size |h| (helps prevent "big jumps" over long coast intervals).
-        // Note: if max_step_s is too small relative to (dt_s / max_substeps), the integrator will fall back
-        // to a final single step to finish the interval.
-        double max_step_s{0.0};
-        double min_step_s{1e-6};
+        bool adaptive{true}; ///< Enable adaptive step size control
+        double abs_tol{1e-3}; ///< Absolute tolerance (meters or m/s)
+        double rel_tol{1e-9}; ///< Relative tolerance
+        int max_substeps{64}; ///< Max substeps before forcing completion
+        double max_step_s{0.0}; ///< Max step size (0 = unlimited)
+        double min_step_s{1e-6}; ///< Min step size for step rejection
     };
 
+    /** @brief Position and velocity state for spacecraft integration. */
     struct SpacecraftKinematics
     {
         Vec3 position_m{0.0, 0.0, 0.0};
         Vec3 velocity_mps{0.0, 0.0, 0.0};
     };
 
+    /**
+     * @brief Compute scaled RMS error norm for DOPRI5 step size control.
+     *
+     * Each component is scaled by (abs_tol + rel_tol * max(|y|, |y_next|)).
+     * Returns sqrt(mean(scaled_error^2)) over all 6 components.
+     */
     inline double dopri5_error_norm(const SpacecraftKinematics &y, const SpacecraftKinematics &y_next,
                                     const SpacecraftKinematics &err, const double abs_tol, const double rel_tol)
     {
@@ -139,6 +164,19 @@ namespace orbitsim
         return std::sqrt(sum / 6.0);
     }
 
+    /**
+     * @brief Single Dormand-Prince 5(4) step with embedded error estimate.
+     *
+     * Computes 5th-order solution and optionally returns error estimate
+     * (difference between 5th and 4th order solutions).
+     *
+     * @param t_s Current time
+     * @param y Current state
+     * @param h_s Step size (can be negative for backward integration)
+     * @param accel_mps2 Acceleration function: f(t, pos, vel) -> acceleration
+     * @param[out] out_err If non-null, receives error estimate (y5 - y4)
+     * @return 5th-order solution at t_s + h_s
+     */
     inline SpacecraftKinematics dopri5_single_step(
             const double t_s, const SpacecraftKinematics &y, const double h_s,
             const std::function<Vec3(double /*t_s*/, const Vec3 & /*pos_m*/, const Vec3 & /*vel_mps*/)> &accel_mps2,
@@ -217,6 +255,20 @@ namespace orbitsim
         return y5;
     }
 
+    /**
+     * @brief Integrate spacecraft motion over a time interval using DOPRI5.
+     *
+     * Adaptive step size control based on local error estimate. Supports
+     * both forward and backward integration. Falls back to single step if
+     * max_substeps exceeded.
+     *
+     * @param t0_s Start time
+     * @param y0 Initial state
+     * @param dt_s Integration interval (positive = forward, negative = backward)
+     * @param accel_mps2 Acceleration function: f(t, pos, vel) -> acceleration
+     * @param opt Integration options (tolerances, step limits)
+     * @return Final state at t0_s + dt_s
+     */
     inline SpacecraftKinematics dopri5_integrate_interval(
             const double t0_s, const SpacecraftKinematics &y0, const double dt_s,
             const std::function<Vec3(double /*t_s*/, const Vec3 & /*pos_m*/, const Vec3 & /*vel_mps*/)> &accel_mps2,
@@ -232,8 +284,7 @@ namespace orbitsim
         double t = t0_s;
         SpacecraftKinematics y = y0;
 
-        const double eff_max_step_s =
-                (opt.max_step_s > 0.0) ? std::max(opt.max_step_s, opt.min_step_s) : 0.0;
+        const double eff_max_step_s = (opt.max_step_s > 0.0) ? std::max(opt.max_step_s, opt.min_step_s) : 0.0;
         const auto clamp_h = [&](double h_s) -> double {
             if (!(eff_max_step_s > 0.0))
             {
