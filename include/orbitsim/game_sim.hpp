@@ -74,9 +74,60 @@ namespace orbitsim
         explicit GameSimulation(Config cfg) : cfg_(std::move(cfg)) {}
 
         double time_s() const { return time_s_; }
+        /**
+         * @brief Set the simulation time (seconds).
+         *
+         * This only updates the internal clock; it does not modify body/spacecraft states.
+         * Intended for "rails"/time-jump workflows where the caller has already advanced
+         * states externally (e.g., via ephemeris/Kepler propagation) and needs to keep
+         * the simulation clock consistent.
+         *
+         * Resets proximity-tracking state to avoid stale enter/exit events after a jump.
+         *
+         * @return true if the time was finite and applied.
+         */
+        bool set_time_s(const double t_s)
+        {
+            if (!std::isfinite(t_s))
+            {
+                return false;
+            }
+            time_s_ = t_s;
+            proximity_initialized_ = false;
+            proximity_active_.clear();
+            return true;
+        }
+
         const Config &config() const { return cfg_; }
 
         const std::vector<MassiveBody> &massive_bodies() const { return massive_; }
+
+        /**
+         * @brief Replace the inertial state of a massive body by ID.
+         *
+         * Intended for rails/time-jump workflows where the caller advances states externally and then injects the
+         * results back into the simulation.
+         *
+         * @return true if the body exists and the state was finite/applied.
+         */
+        bool set_body_state(const BodyId id, const State &state)
+        {
+            MassiveBody *b = body_by_id(id);
+            if (b == nullptr)
+            {
+                return false;
+            }
+            const auto finite3 = [](const Vec3 &v) {
+                return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+            };
+            if (!finite3(state.position_m) || !finite3(state.velocity_mps) || !finite3(state.spin.axis) ||
+                !std::isfinite(state.spin.angle_rad) || !std::isfinite(state.spin.rate_rad_per_s))
+            {
+                return false;
+            }
+            b->state = state;
+            return true;
+        }
 
         BodyId allocate_body_id()
         {
@@ -252,6 +303,38 @@ namespace orbitsim
 
         ManeuverPlan &maneuver_plan() { return plan_; }
         const ManeuverPlan &maneuver_plan() const { return plan_; }
+
+        /**
+         * @brief Replace the inertial state of a spacecraft by ID.
+         *
+         * Intended for rails/time-jump workflows where the caller advances states externally and then injects the
+         * results back into the simulation.
+         *
+         * Resets proximity-tracking state to avoid stale enter/exit events after a jump.
+         *
+         * @return true if the spacecraft exists and the state was finite/applied.
+         */
+        bool set_spacecraft_state(const SpacecraftId id, const State &state)
+        {
+            Spacecraft *sc = spacecraft_by_id(id);
+            if (sc == nullptr)
+            {
+                return false;
+            }
+            const auto finite3 = [](const Vec3 &v) {
+                return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+            };
+            if (!finite3(state.position_m) || !finite3(state.velocity_mps) || !finite3(state.spin.axis) ||
+                !std::isfinite(state.spin.angle_rad) || !std::isfinite(state.spin.rate_rad_per_s))
+            {
+                return false;
+            }
+
+            sc->state = state;
+            proximity_initialized_ = false;
+            proximity_active_.clear();
+            return true;
+        }
 
         /**
          * @brief Find the massive body exerting the strongest gravity on a spacecraft.

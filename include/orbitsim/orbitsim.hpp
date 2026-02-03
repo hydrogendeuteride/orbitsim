@@ -18,3 +18,4 @@
 #include "orbitsim/trajectory_transforms.hpp"
 #include "orbitsim/geodesy.hpp"
 #include "orbitsim/nodes.hpp"
+#include "orbitsim/soi.hpp"

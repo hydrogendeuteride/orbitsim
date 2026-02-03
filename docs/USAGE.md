@@ -443,8 +443,6 @@ std::vector<NodeEvent> target_nodes =
     predict_target_plane_nodes(sim, eph, ship_id, target_id, earth_id, opts);
 ```
 
----
-
 ## Coordinate Frame Transformations
 
 ### RotatingFrame
@@ -823,5 +821,6 @@ int main() {
 | `lambert.hpp` | Lambert solver |
 | `orbit_utils.hpp` | Circular orbit utilities |
 | `nodes.hpp` | NodeEvent, NodeCrossing |
+| `soi.hpp` | Rails primary selection (SOI + hysteresis) |
 | `integrators.hpp` | Integrators (symplectic4, DOPRI5) |
 | `time_utils.hpp` | Time conversions (seconds, minutes, hours, days) |
