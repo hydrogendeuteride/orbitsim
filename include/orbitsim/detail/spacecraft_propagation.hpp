@@ -236,7 +236,7 @@ namespace orbitsim::detail
                     continue;
                 }
                 const std::size_t primary = primary_for_impulse(imp, t_s, pos_m);
-                dv_i += rtn_vector_to_inertial(eph, primary, t_s, pos_m, vel_mps, imp.dv_rtn_mps);
+                dv_i += rtn_vector_to_inertial(eph, bodies, primary, t_s, pos_m, vel_mps, imp.dv_rtn_mps, imp.rtn_frame);
             }
             return dv_i;
         };
@@ -288,6 +288,7 @@ namespace orbitsim::detail
             const double prop_start_kg = out.prop_mass_kg;
             const std::size_t primary = (seg != nullptr) ? primary_for(*seg, t, y.position_m) : 0;
             const Vec3 dir_rtn = (seg != nullptr) ? seg->dir_rtn_unit : Vec3{0.0, 0.0, 0.0};
+            const TrajectoryFrameSpec rtn_frame = (seg != nullptr) ? seg->rtn_frame : TrajectoryFrameSpec{};
 
             auto accel = [&](double t_eval_s, const Vec3 &pos_m, const Vec3 &vel_mps) -> Vec3 {
                 Vec3 a = gravity_accel_mps2(eph, bodies, gravitational_constant, softening_length_m, t_eval_s, pos_m);
@@ -309,7 +310,7 @@ namespace orbitsim::detail
                     return a;
                 }
 
-                const Vec3 dir_i = burn_dir_inertial_unit(eph, primary, t_eval_s, pos_m, vel_mps, dir_rtn);
+                const Vec3 dir_i = burn_dir_inertial_unit(eph, bodies, primary, t_eval_s, pos_m, vel_mps, dir_rtn, rtn_frame);
                 const double dir2 = glm::dot(dir_i, dir_i);
                 if (!(dir2 > 0.0) || !std::isfinite(dir2))
                 {

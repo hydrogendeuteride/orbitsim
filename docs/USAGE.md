@@ -40,19 +40,19 @@ cmake --build build -j
 
 ### Dual-Simulation Strategy
 
-orbitsim integrates **massive bodies** and **spacecraft** differently:
+orbitsim integrates massive bodies and spacecraft differently:
 
-- **Massive Bodies (MassiveBody)**: 4th-order Yoshida symplectic integrator (long-term energy conservation)
-- **Spacecraft**: Adaptive DOPRI5(4) integrator (high-precision local dynamics)
+- Massive Bodies (MassiveBody): 4th-order Yoshida symplectic integrator (long-term energy conservation)
+- Spacecraft: Adaptive DOPRI5(4) integrator (high-precision local dynamics)
 
 This separation allows spacecraft to have accurate trajectories without affecting massive body dynamics.
 
 ### Coordinate System
 
-- **Inertial barycentric frame**
-- **SI units**: meters, seconds, kilograms
-- **Angles**: radians
-- **Vectors**: `Vec3 = glm::dvec3` (double precision)
+- Inertial barycentric frame
+- SI units: meters, seconds, kilograms
+- Angles: radians
+- Vectors: `Vec3 = glm::dvec3` (double precision)
 
 ---
 
@@ -225,10 +225,10 @@ sim.step(hours(1.0));  // Simulate 1 hour
 
 ### RTN Coordinate Frame
 
-Maneuvers are defined in the **RTN (Radial-Tangential-Normal)** frame:
-- **R (Radial)**: From central body toward spacecraft
-- **T (Tangential)**: Velocity direction (prograde)
-- **N (Normal)**: Orbital plane normal
+Maneuvers are defined in the RTN (Radial-Tangential-Normal) frame:
+- R (Radial): From central body toward spacecraft
+- T (Tangential): Velocity direction (prograde)
+- N (Normal): Orbital plane normal
 
 ### Direction Constants
 
@@ -266,6 +266,17 @@ auto burn5 = burn()
     .full_throttle()
     .spacecraft(ship_id)
     .build();
+
+// Optional: compute the RTN basis in a chosen reference frame (default: inertial).
+// Example: RTN about Earth, but with the basis computed in the Earth-Moon synodic frame.
+auto burn6 = burn()
+    .start(hours(5.5))
+    .duration(minutes(10.0))
+    .prograde()
+    .primary(earth_id)
+    .rtn_synodic(earth_id, moon_id)
+    .spacecraft(ship_id)
+    .build();
 ```
 
 ### ImpulseSegment - Instantaneous Delta-v
@@ -281,6 +292,15 @@ imp.spacecraft_id = ship_id;
 auto imp2 = impulse()
     .time(hours(2.0))
     .prograde(150.0)     // 150 m/s
+    .spacecraft(ship_id)
+    .build();
+
+// Optional: compute the RTN basis in a chosen reference frame (default: inertial).
+auto imp4 = impulse()
+    .time(hours(2.5))
+    .prograde(150.0)
+    .primary(earth_id)
+    .rtn_synodic(earth_id, moon_id)
     .spacecraft(ship_id)
     .build();
 
@@ -414,22 +434,17 @@ for (const auto& sample : earth_traj) {
     // Use sample.t_s, sample.position_m, sample.velocity_mps
 }
 
-// Predict in relative coordinates (relative to Sun)
-auto opts_rel = trajectory_options()
-    .duration(days(365.0))
-    .origin(sun_id)  // Sun-centered coordinates
-    .build();
+// Trajectory prediction always returns inertial samples.
+auto earth_traj_inertial = predict_body_trajectory(sim, eph, earth_id, opts);
 
-auto earth_rel_traj = predict_body_trajectory(sim, eph, earth_id, opts_rel);
+// Convert for display/analysis (e.g., Sun-centered inertial coordinates).
+TrajectoryFrameSpec sun_frame = TrajectoryFrameSpec::body_centered_inertial(sun_id);
+auto earth_rel_traj = trajectory_to_frame_spec(earth_traj_inertial, eph, sim.massive_bodies(), sun_frame);
 
-// Predict in a synodic (co-rotating) frame (Earth-Moon)
-// Propagation still occurs in inertial; only the returned samples are transformed.
-auto opts_syn = trajectory_options()
-    .duration(days(30.0))
-    .synodic(earth_id, moon_id)
-    .build();
-
-auto ship_syn_traj = predict_spacecraft_trajectory(sim, eph, ship_id, opts_syn);
+// Convert to a synodic (co-rotating) frame (Earth-Moon).
+TrajectoryFrameSpec em_syn = TrajectoryFrameSpec::synodic(earth_id, moon_id);
+auto ship_traj_inertial = predict_spacecraft_trajectory(sim, eph, ship_id, opts);
+auto ship_syn_traj = trajectory_to_frame_spec(ship_traj_inertial, eph, sim.massive_bodies(), em_syn);
 ```
 
 ### Predicting Spacecraft Trajectories
@@ -438,14 +453,9 @@ auto ship_syn_traj = predict_spacecraft_trajectory(sim, eph, ship_id, opts_syn);
 std::vector<TrajectorySample> ship_traj =
     predict_spacecraft_trajectory(sim, eph, ship_id, opts);
 
-// Predict in Earth-centered coordinates
-auto opts_earth = trajectory_options()
-    .duration(hours(2.0))
-    .sample_dt(seconds(10.0))
-    .origin(earth_id)
-    .build();
-
-auto ship_rel = predict_spacecraft_trajectory(sim, eph, ship_id, opts_earth);
+// Convert for plotting in Earth-centered inertial coordinates
+TrajectoryFrameSpec earth_frame = TrajectoryFrameSpec::body_centered_inertial(earth_id);
+auto ship_rel = trajectory_to_frame_spec(ship_traj, eph, sim.massive_bodies(), earth_frame);
 ```
 
 ### Predicting Spacecraft Events
@@ -731,7 +741,7 @@ BodyId primary = select_primary_body_id_rails(
 );
 ```
 
-**Behavior:**
+Behavior:
 - Immediately switches into smaller/local SOIs (e.g., Earth → Moon)
 - Uses hysteresis when exiting to prevent boundary thrashing
 - Falls back to max-acceleration selection when no SOI contains the spacecraft
@@ -834,11 +844,13 @@ int main() {
     auto opts = trajectory_options()
         .duration(hours(2.0))
         .sample_dt(seconds(30.0))
-        .origin(earth_id)
         .build();
 
     CelestialEphemeris eph = build_celestial_ephemeris(sim, opts);
-    auto traj = predict_spacecraft_trajectory(sim, eph, ship_id, opts);
+    auto traj_inertial = predict_spacecraft_trajectory(sim, eph, ship_id, opts);
+
+    TrajectoryFrameSpec earth_frame = TrajectoryFrameSpec::body_centered_inertial(earth_id);
+    auto traj = trajectory_to_frame_spec(traj_inertial, eph, sim.massive_bodies(), earth_frame);
 
     std::cout << "Trajectory samples: " << traj.size() << std::endl;
 

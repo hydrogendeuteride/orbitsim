@@ -5,7 +5,6 @@
 #include "orbitsim/game_sim.hpp"
 #include "orbitsim/nodes.hpp"
 #include "orbitsim/time_utils.hpp"
-#include "orbitsim/trajectory_transforms.hpp"
 #include "orbitsim/trajectory_types.hpp"
 #include "orbitsim/types.hpp"
 
@@ -21,56 +20,8 @@ namespace orbitsim
     /**
      * @brief Configuration for trajectory prediction and sampling.
      *
-     * Controls duration, sample intervals, and coordinate frame for
-     * trajectory prediction functions.
+     * Controls duration and sample intervals for trajectory prediction functions.
      */
-
-    /// @brief Output coordinate frame for returned trajectory samples.
-    ///
-    /// This affects only how samples are expressed for planning/display; it does not change the underlying
-    /// propagation/integration, which always occurs in the simulation's inertial frame.
-    enum class TrajectoryFrameType
-    {
-        Inertial,
-        BodyCenteredInertial,
-        BodyFixed,
-        Synodic,
-    };
-
-    /// @brief Parameterization for the output coordinate frame of trajectory samples.
-    ///
-    /// - Inertial: samples are returned in the simulation inertial frame.
-    /// - BodyCenteredInertial: translation to a body's instantaneous state (no rotation).
-    /// - BodyFixed: body-fixed rotating frame derived from the body's spin state.
-    /// - Synodic: two-body barycentric co-rotating frame for (A,B) with +X along A->B.
-    struct TrajectoryFrameSpec
-    {
-        TrajectoryFrameType type{TrajectoryFrameType::Inertial};
-
-        /// Primary body id (used by BodyCenteredInertial, BodyFixed, and as body A in Synodic).
-        BodyId primary_body_id{kInvalidBodyId};
-        /// Secondary body id (used only by Synodic as body B).
-        BodyId secondary_body_id{kInvalidBodyId};
-
-        static TrajectoryFrameSpec inertial() { return {}; }
-
-        static TrajectoryFrameSpec body_centered_inertial(const BodyId body_id)
-        {
-            return TrajectoryFrameSpec{.type = TrajectoryFrameType::BodyCenteredInertial, .primary_body_id = body_id};
-        }
-
-        static TrajectoryFrameSpec body_fixed(const BodyId body_id)
-        {
-            return TrajectoryFrameSpec{.type = TrajectoryFrameType::BodyFixed, .primary_body_id = body_id};
-        }
-
-        static TrajectoryFrameSpec synodic(const BodyId body_a_id, const BodyId body_b_id)
-        {
-            return TrajectoryFrameSpec{.type = TrajectoryFrameType::Synodic,
-                                       .primary_body_id = body_a_id,
-                                       .secondary_body_id = body_b_id};
-        }
-    };
 
     struct TrajectoryOptions
     {
@@ -89,9 +40,6 @@ namespace orbitsim
 
         bool include_start{true};   ///< Include sample at t0
         bool include_end{true};     ///< Include sample at t0 + duration
-
-        /// Output coordinate frame for returned samples (display/planning only).
-        TrajectoryFrameSpec frame{};
     };
 
     namespace detail
@@ -202,53 +150,6 @@ namespace orbitsim
             return TrajectorySample{.t_s = t_s, .position_m = s.position_m, .velocity_mps = s.velocity_mps};
         }
 
-        inline std::vector<TrajectorySample> apply_trajectory_frame_(const GameSimulation &sim,
-                                                                      const CelestialEphemeris &eph,
-                                                                      const TrajectoryFrameSpec &frame,
-                                                                      std::vector<TrajectorySample> samples_in)
-        {
-            if (samples_in.empty())
-            {
-                return samples_in;
-            }
-
-            switch (frame.type)
-            {
-            case TrajectoryFrameType::Inertial:
-                return samples_in;
-            case TrajectoryFrameType::BodyCenteredInertial:
-            {
-                const MassiveBody *body = sim.body_by_id(frame.primary_body_id);
-                if (body == nullptr)
-                {
-                    return {};
-                }
-                return trajectory_to_body_centered_inertial(samples_in, eph, *body);
-            }
-            case TrajectoryFrameType::BodyFixed:
-            {
-                const MassiveBody *body = sim.body_by_id(frame.primary_body_id);
-                if (body == nullptr)
-                {
-                    return {};
-                }
-                return trajectory_to_body_fixed(samples_in, eph, *body);
-            }
-            case TrajectoryFrameType::Synodic:
-            {
-                const MassiveBody *body_a = sim.body_by_id(frame.primary_body_id);
-                const MassiveBody *body_b = sim.body_by_id(frame.secondary_body_id);
-                if (body_a == nullptr || body_b == nullptr)
-                {
-                    return {};
-                }
-                return trajectory_to_synodic(samples_in, eph, *body_a, *body_b);
-            }
-            }
-
-            return samples_in;
-        }
-
         inline std::vector<TrajectorySample> predict_body_trajectory_from_ephemeris_(const GameSimulation &sim,
                                                                                      const CelestialEphemeris &eph,
                                                                                      const BodyId body_id,
@@ -313,7 +214,7 @@ namespace orbitsim
                 out.push_back(make_sample_(t, s));
             }
 
-            return apply_trajectory_frame_(sim, eph, opt.frame, std::move(out));
+            return out;
         }
 
         inline std::vector<TrajectorySample>
@@ -380,7 +281,7 @@ namespace orbitsim
                 out.push_back(make_sample_(t, sc.state));
             }
 
-            return apply_trajectory_frame_(sim, eph, opt.frame, std::move(out));
+            return out;
         }
 
         inline bool is_terminal_event_(const Event &e)
@@ -958,52 +859,6 @@ namespace orbitsim
             opt_.include_end = include;
             return *this;
         }
-
-        /// @brief Set the output frame for returned samples.
-        TrajectoryOptionsBuilder &frame(const TrajectoryFrameSpec &frame)
-        {
-            opt_.frame = frame;
-            return *this;
-        }
-
-        /// @brief Return samples in the simulation inertial frame.
-        TrajectoryOptionsBuilder &inertial()
-        {
-            opt_.frame = TrajectoryFrameSpec::inertial();
-            return *this;
-        }
-
-        /// @brief Return samples in a body-centered inertial frame (translation only; no rotation).
-        TrajectoryOptionsBuilder &body_centered_inertial(const BodyId body_id)
-        {
-            opt_.frame = TrajectoryFrameSpec::body_centered_inertial(body_id);
-            return *this;
-        }
-
-        /// @brief Return samples in a body-fixed rotating frame (ECEF-style).
-        TrajectoryOptionsBuilder &body_fixed(const BodyId body_id)
-        {
-            opt_.frame = TrajectoryFrameSpec::body_fixed(body_id);
-            return *this;
-        }
-
-        /// @brief Return samples in a two-body synodic rotating frame derived from (A,B).
-        ///
-        /// The +X axis points from body A to body B.
-        TrajectoryOptionsBuilder &synodic(const BodyId body_a_id, const BodyId body_b_id)
-        {
-            opt_.frame = TrajectoryFrameSpec::synodic(body_a_id, body_b_id);
-            return *this;
-        }
-
-        /// @brief Alias for body_centered_inertial() (legacy name).
-        TrajectoryOptionsBuilder &origin(const BodyId origin_body_id)
-        {
-            return body_centered_inertial(origin_body_id);
-        }
-
-        /// @brief Alias for inertial() (legacy name).
-        TrajectoryOptionsBuilder &no_origin() { return inertial(); }
 
         /// @brief Implicit conversion to TrajectoryOptions.
         operator TrajectoryOptions() const { return opt_; }

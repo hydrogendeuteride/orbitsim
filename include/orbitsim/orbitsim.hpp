@@ -9,6 +9,7 @@
 #include "orbitsim/ephemeris.hpp"
 #include "orbitsim/events.hpp"
 #include "orbitsim/coordinate_frames.hpp"
+#include "orbitsim/frame_spec.hpp"
 #include "orbitsim/synodic.hpp"
 #include "orbitsim/game_sim.hpp"
 #include "orbitsim/maneuvers.hpp"

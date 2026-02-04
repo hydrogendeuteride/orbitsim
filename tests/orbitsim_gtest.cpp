@@ -143,10 +143,15 @@ TEST(Trajectories, PredictSpacecraftTrajectoryLinearMotion)
     opt.max_samples = 64;
     opt.include_start = true;
     opt.include_end = true;
-    opt.frame = orbitsim::TrajectoryFrameSpec::body_centered_inertial(origin_h);
 
-    const std::vector<orbitsim::TrajectorySample> traj = orbitsim::predict_spacecraft_trajectory(sim, sc_h, opt);
-    ASSERT_EQ(traj.size(), 11u);
+    const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris(sim, opt);
+    const std::vector<orbitsim::TrajectorySample> traj_inertial =
+            orbitsim::predict_spacecraft_trajectory(sim, eph, sc_h.id, opt);
+    ASSERT_EQ(traj_inertial.size(), 11u);
+
+    const std::vector<orbitsim::TrajectorySample> traj = orbitsim::trajectory_to_frame_spec(
+            traj_inertial, eph, sim.massive_bodies(), orbitsim::TrajectoryFrameSpec::body_centered_inertial(origin_h));
+    ASSERT_EQ(traj.size(), traj_inertial.size());
 
     // Relative position should drift at (v_sc - v_body) = 0.5 m/s, starting from 10m.
     EXPECT_TRUE(near_abs(traj.front().t_s, 0.0, 1e-12));
@@ -228,12 +233,16 @@ TEST(Trajectories, BodyTrajectoryRelativeToSelfIsZero)
     opt.sample_dt_s = 1.0;
     opt.celestial_dt_s = 1.0;
     opt.max_samples = 64;
-    opt.frame = orbitsim::TrajectoryFrameSpec::body_centered_inertial(self_h);
 
     const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris(sim, opt);
-    const std::vector<orbitsim::TrajectorySample> traj = orbitsim::predict_body_trajectory(sim, eph, self_h, opt);
-    ASSERT_EQ(traj.size(), 6u);
-    for (const auto &s: traj)
+    const std::vector<orbitsim::TrajectorySample> traj_inertial = orbitsim::predict_body_trajectory(sim, eph, self_h, opt);
+    ASSERT_EQ(traj_inertial.size(), 6u);
+
+    const std::vector<orbitsim::TrajectorySample> rel = orbitsim::trajectory_to_frame_spec(
+            traj_inertial, eph, sim.massive_bodies(), orbitsim::TrajectoryFrameSpec::body_centered_inertial(self_h));
+    ASSERT_EQ(rel.size(), traj_inertial.size());
+
+    for (const auto &s: rel)
     {
         EXPECT_TRUE(near_vec_abs(s.position_m, orbitsim::Vec3{0.0, 0.0, 0.0}, 1e-12));
         EXPECT_TRUE(near_vec_abs(s.velocity_mps, orbitsim::Vec3{0.0, 0.0, 0.0}, 1e-12));
@@ -442,7 +451,9 @@ TEST(GameSimulation, StepReturnsImpactEvent)
     ASSERT_TRUE(sc_h.valid());
 
     std::vector<orbitsim::Event> events;
-    sim.step(5.0, &events);
+    // Use a step that brackets the boundary crossing (outside -> inside) so endpoint-based
+    // event detection can find the root via bisection.
+    sim.step(2.0, &events);
 
     ASSERT_FALSE(events.empty());
     EXPECT_EQ(events.front().type, orbitsim::EventType::Impact);
@@ -517,13 +528,22 @@ TEST(Maneuvers, ImpulseChangesVelocity)
     });
     ASSERT_TRUE(sc_h.valid());
 
-    sim.maneuver_plan().impulses.push_back(orbitsim::impulse().time(1.0).prograde(5.0).primary(body_h).spacecraft(sc_h));
+    constexpr double t_impulse_s = 1.0;
+    constexpr double dv_prograde_mps = 5.0;
+    sim.maneuver_plan().impulses.push_back(
+            orbitsim::impulse().time(t_impulse_s).prograde(dv_prograde_mps).primary(body_h).spacecraft(sc_h));
 
     sim.step(2.0);
 
     const orbitsim::Spacecraft *out = sim.spacecraft_by_id(sc_h.id);
     ASSERT_NE(out, nullptr);
-    EXPECT_TRUE(near_abs(out->state.velocity_mps.y, 6.0, 1e-9));
+
+    const orbitsim::Vec3 r_rel_m = orbitsim::Vec3{10.0, 0.0, 0.0} + orbitsim::Vec3{0.0, 1.0, 0.0} * t_impulse_s;
+    const orbitsim::Vec3 v_rel_mps{0.0, 1.0, 0.0};
+    const orbitsim::RtnFrame rtn = orbitsim::compute_rtn_frame(r_rel_m, v_rel_mps);
+    const orbitsim::Vec3 expected_vel_mps = v_rel_mps + dv_prograde_mps * rtn.T;
+
+    EXPECT_TRUE(near_vec_abs(out->state.velocity_mps, expected_vel_mps, 1e-9));
 }
 
 TEST(Geodesy, RoundTripGeodeticSpherical)
@@ -603,7 +623,13 @@ TEST(GameSimulation, ProximityEnterExitWithHysteresis)
     ASSERT_TRUE(target_h.valid());
 
     std::vector<orbitsim::Event> events;
-    sim.step(7000.0, &events);
+    std::vector<orbitsim::Event> tmp;
+
+    // Step in two chunks so each proximity crossing is bracketed by endpoints.
+    sim.step(3000.0, &tmp); // Brackets enter at t=2000
+    events.insert(events.end(), tmp.begin(), tmp.end());
+    sim.step(4000.0, &tmp); // Brackets exit at t=6400
+    events.insert(events.end(), tmp.begin(), tmp.end());
 
     std::vector<orbitsim::Event> prox;
     for (const auto &e: events)
@@ -718,7 +744,7 @@ TEST(Math, OrbitalElementsAboutAxisUsesSpinAxis)
 
     // Simple orbit in XZ plane => angular momentum along +Y.
     const orbitsim::Vec3 r{1.0, 0.0, 0.0};
-    const orbitsim::Vec3 v{0.0, 0.0, 1.0};
+    const orbitsim::Vec3 v{0.0, 0.0, -1.0};
 
     const orbitsim::OrbitalElements el = orbitsim::orbital_elements_from_relative_state_about_axis(mu, r, v, ref_axis);
     EXPECT_TRUE(near_abs(el.inclination_rad, 0.0, 1e-9));

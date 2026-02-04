@@ -181,26 +181,26 @@ int main()
 
     const CelestialEphemeris eph = build_celestial_ephemeris(sim, traj_opt);
 
-    // Earth/Moon orbits around Sun (relative to the Sun).
-    const auto traj_opt_sun = trajectory_options()
-            .duration(days(20.0))
-            .sample_dt(minutes(10.0))
-            .celestial_dt(minutes(5.0))
-            .max_samples(100'000)
-            .origin(sun_id);
-    const std::vector<TrajectorySample> earth_traj = predict_body_trajectory(sim, eph, earth_id, traj_opt_sun);
-    const std::vector<TrajectorySample> moon_traj_sun = predict_body_trajectory(sim, eph, moon_id, traj_opt_sun);
-    const std::vector<TrajectorySample> sc_traj_sun = predict_spacecraft_trajectory(sim, eph, sc_id, traj_opt_sun);
+    // Predict inertial trajectories once, then transform for plotting.
+    const std::vector<TrajectorySample> earth_traj_inertial = predict_body_trajectory(sim, eph, earth_id, traj_opt);
+    const std::vector<TrajectorySample> moon_traj_inertial = predict_body_trajectory(sim, eph, moon_id, traj_opt);
+    const std::vector<TrajectorySample> sc_traj_inertial = predict_spacecraft_trajectory(sim, eph, sc_id, traj_opt);
 
-    // Moon + spacecraft around Earth (relative to Earth).
-    const auto traj_opt_earth = trajectory_options()
-            .duration(days(20.0))
-            .sample_dt(minutes(10.0))
-            .celestial_dt(minutes(5.0))
-            .max_samples(100'000)
-            .origin(earth_id);
-    const std::vector<TrajectorySample> moon_traj_earth = predict_body_trajectory(sim, eph, moon_id, traj_opt_earth);
-    const std::vector<TrajectorySample> sc_traj = predict_spacecraft_trajectory(sim, eph, sc_id, traj_opt_earth);
+    // Earth/Moon/spacecraft around Sun (sun-centered inertial coordinates).
+    const TrajectoryFrameSpec sun_frame = TrajectoryFrameSpec::body_centered_inertial(sun_id);
+    const std::vector<TrajectorySample> earth_traj =
+            trajectory_to_frame_spec(earth_traj_inertial, eph, sim.massive_bodies(), sun_frame);
+    const std::vector<TrajectorySample> moon_traj_sun =
+            trajectory_to_frame_spec(moon_traj_inertial, eph, sim.massive_bodies(), sun_frame);
+    const std::vector<TrajectorySample> sc_traj_sun =
+            trajectory_to_frame_spec(sc_traj_inertial, eph, sim.massive_bodies(), sun_frame);
+
+    // Moon + spacecraft around Earth (earth-centered inertial coordinates).
+    const TrajectoryFrameSpec earth_frame = TrajectoryFrameSpec::body_centered_inertial(earth_id);
+    const std::vector<TrajectorySample> moon_traj_earth =
+            trajectory_to_frame_spec(moon_traj_inertial, eph, sim.massive_bodies(), earth_frame);
+    const std::vector<TrajectorySample> sc_traj =
+            trajectory_to_frame_spec(sc_traj_inertial, eph, sim.massive_bodies(), earth_frame);
 
     // High-resolution spacecraft path near Earth for smooth LEO rendering.
     const auto earth_hi = trajectory_options()
@@ -208,18 +208,15 @@ int main()
             .sample_dt(seconds(5.0))
             .spacecraft_sample_dt(seconds(5.0))
             .celestial_dt(seconds(30.0))
-            .max_samples(50'000)
-            .origin(earth_id);
-    const std::vector<TrajectorySample> sc_traj_earth_hi = predict_spacecraft_trajectory(sim, eph, sc_id, earth_hi);
+            .max_samples(50'000);
+    const std::vector<TrajectorySample> sc_traj_earth_hi_inertial = predict_spacecraft_trajectory(sim, eph, sc_id, earth_hi);
+    const std::vector<TrajectorySample> sc_traj_earth_hi =
+            trajectory_to_frame_spec(sc_traj_earth_hi_inertial, eph, sim.massive_bodies(), earth_frame);
 
-    // Spacecraft around Moon (relative to Moon).
-    const auto traj_opt_moon = trajectory_options()
-            .duration(days(20.0))
-            .sample_dt(minutes(10.0))
-            .celestial_dt(minutes(5.0))
-            .max_samples(100'000)
-            .origin(moon_id);
-    const std::vector<TrajectorySample> sc_traj_moon = predict_spacecraft_trajectory(sim, eph, sc_id, traj_opt_moon);
+    // Spacecraft around Moon (moon-centered inertial coordinates).
+    const TrajectoryFrameSpec moon_frame = TrajectoryFrameSpec::body_centered_inertial(moon_id);
+    const std::vector<TrajectorySample> sc_traj_moon =
+            trajectory_to_frame_spec(sc_traj_inertial, eph, sim.massive_bodies(), moon_frame);
 
     // Short-horizon trajectories for event probes (keep output small and avoid singular behavior past impact).
     const auto reentry_short_inertial = trajectory_options()
@@ -227,34 +224,26 @@ int main()
             .sample_dt(seconds(1.0))
             .celestial_dt(seconds(1.0))
             .max_samples(20'000);
-    const auto reentry_short_earth = trajectory_options()
-            .duration(minutes(12.0))
-            .sample_dt(seconds(1.0))
-            .celestial_dt(seconds(1.0))
-            .max_samples(20'000)
-            .origin(earth_id);
 
     const auto moon_soi_short_inertial = trajectory_options()
             .duration(hours(4.0))
             .sample_dt(seconds(10.0))
             .celestial_dt(seconds(10.0))
             .max_samples(20'000);
-    const auto moon_soi_short_moon = trajectory_options()
-            .duration(hours(4.0))
-            .sample_dt(seconds(10.0))
-            .celestial_dt(seconds(10.0))
-            .max_samples(20'000)
-            .origin(moon_id);
 
     std::vector<TrajectorySample> sc_reentry_rel_earth;
     std::vector<TrajectorySample> sc_moon_soi_rel_moon;
     if (sc_reentry_h.valid())
     {
-        sc_reentry_rel_earth = predict_spacecraft_trajectory(sim, eph, sc_reentry_h.id, reentry_short_earth);
+        const std::vector<TrajectorySample> sc_reentry_inertial =
+                predict_spacecraft_trajectory(sim, eph, sc_reentry_h.id, reentry_short_inertial);
+        sc_reentry_rel_earth = trajectory_to_frame_spec(sc_reentry_inertial, eph, sim.massive_bodies(), earth_frame);
     }
     if (sc_moon_soi_h.valid())
     {
-        sc_moon_soi_rel_moon = predict_spacecraft_trajectory(sim, eph, sc_moon_soi_h.id, moon_soi_short_moon);
+        const std::vector<TrajectorySample> sc_moon_soi_inertial =
+                predict_spacecraft_trajectory(sim, eph, sc_moon_soi_h.id, moon_soi_short_inertial);
+        sc_moon_soi_rel_moon = trajectory_to_frame_spec(sc_moon_soi_inertial, eph, sim.massive_bodies(), moon_frame);
     }
 
     // -------------------------------------------------------------------------
@@ -347,13 +336,17 @@ int main()
                 .duration(dt_transfer_s)
                 .sample_dt(minutes(30.0))
                 .celestial_dt(minutes(10.0))
-                .max_samples(50'000)
-                .origin(earth_id);
+                .max_samples(50'000);
+
+        const std::vector<TrajectorySample> lam_sc_inertial =
+                predict_spacecraft_trajectory(sim, eph, sc_lambert_h.id, lam_opt_traj);
+        const std::vector<TrajectorySample> lam_moon_inertial =
+                predict_body_trajectory(sim, eph, moon_id, lam_opt_traj);
 
         const std::vector<TrajectorySample> lam_sc_rel_earth =
-                predict_spacecraft_trajectory(sim, eph, sc_lambert_h.id, lam_opt_traj);
+                trajectory_to_frame_spec(lam_sc_inertial, eph, sim.massive_bodies(), earth_frame);
         const std::vector<TrajectorySample> lam_moon_rel_earth =
-                predict_body_trajectory(sim, eph, moon_id, lam_opt_traj);
+                trajectory_to_frame_spec(lam_moon_inertial, eph, sim.massive_bodies(), earth_frame);
 
         std::printf("lambert_sc_rel_earth\n");
         for (const auto &s: lam_sc_rel_earth)
@@ -453,7 +446,8 @@ int main()
             .sample_dt(minutes(10.0))
             .celestial_dt(minutes(5.0))
             .max_samples(100'000);
-    const std::vector<TrajectorySample> sc_traj_inertial = predict_spacecraft_trajectory(sim, eph, sc_id, traj_opt_inertial);
+    // Note: reuse the inertial trajectory sampled earlier; do not feed a pre-transformed (relative) trajectory
+    // into trajectory_to_synodic().
     const std::vector<TrajectorySample> sc_traj_synodic = trajectory_to_synodic(sc_traj_inertial, eph, *earth_ptr, *moon_ptr);
 
     std::printf("sc_synodic\n");

@@ -1,6 +1,8 @@
 #pragma once
 
+#include "orbitsim/frame_spec.hpp"
 #include "orbitsim/ephemeris.hpp"
+#include "orbitsim/synodic.hpp"
 #include "orbitsim/math.hpp"
 #include "orbitsim/types.hpp"
 
@@ -30,14 +32,17 @@ namespace orbitsim
      * @brief Continuous thrust segment over a time interval.
      *
      * Thrust direction is specified in RTN (Radial-Tangential-Normal) frame
-     * relative to a primary body. If primary_body_id is invalid, the body
-     * with highest gravitational acceleration is auto-selected.
+     * relative to a primary body, with the RTN basis computed in `rtn_frame`.
+     *
+     * If primary_body_id is invalid, the body with highest gravitational
+     * acceleration is auto-selected.
      */
     struct BurnSegment
     {
         double t_start_s{0.0};
         double t_end_s{0.0};
         BodyId primary_body_id{kInvalidBodyId}; ///< RTN frame primary; invalid = auto-select
+        TrajectoryFrameSpec rtn_frame{}; ///< Frame used to compute RTN basis (default: inertial)
         Vec3 dir_rtn_unit{0.0, 0.0, 0.0}; ///< Thrust direction in (R, T, N)
         double throttle_0_1{0.0}; ///< Throttle level [0, 1]
         std::size_t engine_index{0}; ///< Index into Spacecraft::engines
@@ -48,12 +53,14 @@ namespace orbitsim
      * @brief Instantaneous delta-v at a single time (ideal maneuver node).
      *
      * Useful for maneuver planning and debugging. The delta-v is expressed
-     * in RTN components relative to the chosen primary body.
+     * in RTN components relative to the chosen primary body, with the RTN
+     * basis computed in `rtn_frame`.
      */
     struct ImpulseSegment
     {
         double t_s{0.0};
         BodyId primary_body_id{kInvalidBodyId}; ///< RTN frame primary; invalid = auto-select
+        TrajectoryFrameSpec rtn_frame{}; ///< Frame used to compute RTN basis (default: inertial)
         Vec3 dv_rtn_mps{0.0, 0.0, 0.0}; ///< Delta-v in (R, T, N) [m/s]
         SpacecraftId spacecraft_id{kAllSpacecraft};
     };
@@ -95,6 +102,117 @@ namespace orbitsim
 
     namespace detail
     {
+        inline bool body_index_for_id_(const std::vector<MassiveBody> &bodies, const BodyId id, std::size_t *out_index)
+        {
+            if (out_index == nullptr)
+            {
+                return false;
+            }
+            *out_index = 0;
+            if (id == kInvalidBodyId)
+            {
+                return false;
+            }
+            for (std::size_t i = 0; i < bodies.size(); ++i)
+            {
+                if (bodies[i].id == id)
+                {
+                    *out_index = i;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        template<class EphemerisLike>
+        inline std::optional<RotatingFrame> make_rtn_reference_frame_at_(const EphemerisLike &eph,
+                                                                         const std::vector<MassiveBody> &bodies,
+                                                                         const TrajectoryFrameSpec &spec,
+                                                                         const double t_s)
+        {
+            switch (spec.type)
+            {
+            case TrajectoryFrameType::Inertial:
+                return RotatingFrame{};
+            case TrajectoryFrameType::BodyCenteredInertial:
+            {
+                std::size_t idx = 0;
+                if (!body_index_for_id_(bodies, spec.primary_body_id, &idx))
+                {
+                    return std::nullopt;
+                }
+                return make_body_centered_inertial_frame(eph.body_state_at(idx, t_s));
+            }
+            case TrajectoryFrameType::BodyFixed:
+            {
+                std::size_t idx = 0;
+                if (!body_index_for_id_(bodies, spec.primary_body_id, &idx))
+                {
+                    return std::nullopt;
+                }
+                return make_body_fixed_frame(eph.body_state_at(idx, t_s));
+            }
+            case TrajectoryFrameType::Synodic:
+            {
+                std::size_t ia = 0;
+                std::size_t ib = 0;
+                if (!body_index_for_id_(bodies, spec.primary_body_id, &ia) ||
+                    !body_index_for_id_(bodies, spec.secondary_body_id, &ib))
+                {
+                    return std::nullopt;
+                }
+
+                const State a_state = eph.body_state_at(ia, t_s);
+                const State b_state = eph.body_state_at(ib, t_s);
+                const std::optional<SynodicFrame> syn =
+                        make_synodic_frame(a_state, bodies[ia].mass_kg, b_state, bodies[ib].mass_kg);
+                if (!syn.has_value())
+                {
+                    return std::nullopt;
+                }
+                return RotatingFrame{*syn};
+            }
+            }
+
+            return RotatingFrame{};
+        }
+
+        template<class EphemerisLike>
+        inline Vec3 rtn_vector_to_inertial_in_frame_(const EphemerisLike &eph, const std::vector<MassiveBody> &bodies,
+                                                     const std::size_t primary_index, const double t_s,
+                                                     const Vec3 &sc_pos_m, const Vec3 &sc_vel_mps, const Vec3 &v_rtn,
+                                                     const TrajectoryFrameSpec &rtn_frame)
+        {
+            const std::optional<RotatingFrame> ref_frame_opt =
+                    make_rtn_reference_frame_at_(eph, bodies, rtn_frame, t_s);
+            if (!ref_frame_opt.has_value())
+            {
+                return Vec3{0.0, 0.0, 0.0};
+            }
+            const RotatingFrame &ref_frame = *ref_frame_opt;
+
+            const State sc_f = inertial_state_to_frame(make_state(sc_pos_m, sc_vel_mps), ref_frame);
+            const State primary_f = inertial_state_to_frame(eph.body_state_at(primary_index, t_s), ref_frame);
+
+            const Vec3 r_rel_f = sc_f.position_m - primary_f.position_m;
+            const Vec3 v_rel_f = sc_f.velocity_mps - primary_f.velocity_mps;
+            const RtnFrame f = compute_rtn_frame(r_rel_f, v_rel_f);
+
+            const Vec3 v_frame = v_rtn.x * f.R + v_rtn.y * f.T + v_rtn.z * f.N;
+            return frame_vector_to_inertial(ref_frame, v_frame);
+        }
+
+        template<class EphemerisLike>
+        inline Vec3 burn_dir_inertial_unit_in_frame_(const EphemerisLike &eph, const std::vector<MassiveBody> &bodies,
+                                                     const std::size_t primary_index, const double t_s,
+                                                     const Vec3 &sc_pos_m, const Vec3 &sc_vel_mps,
+                                                     const Vec3 &dir_rtn_unit, const TrajectoryFrameSpec &rtn_frame)
+        {
+            const Vec3 dir_i = rtn_vector_to_inertial_in_frame_(eph, bodies, primary_index, t_s, sc_pos_m, sc_vel_mps,
+                                                                dir_rtn_unit, rtn_frame);
+            return normalized_or(dir_i, Vec3{0.0, 0.0, 0.0});
+        }
+
         template<class Pred>
         inline const BurnSegment *active_burn_at_if_(const ManeuverPlan &plan, const double t_s, Pred pred)
         {
@@ -173,56 +291,44 @@ namespace orbitsim
             }
             return bound;
         }
-
-        template<class EphemerisLike>
-        inline Vec3 rtn_vector_to_inertial_(const EphemerisLike &eph, const std::size_t primary_index, const double t_s,
-                                            const Vec3 &sc_pos_m, const Vec3 &sc_vel_mps, const Vec3 &v_rtn)
-        {
-            const Vec3 r_primary_m = eph.body_position_at(primary_index, t_s);
-            const Vec3 v_primary_mps = eph.body_velocity_at(primary_index, t_s);
-
-            const Vec3 r_rel = sc_pos_m - r_primary_m;
-            const Vec3 v_rel = sc_vel_mps - v_primary_mps;
-            const RtnFrame f = compute_rtn_frame(r_rel, v_rel);
-
-            return v_rtn.x * f.R + v_rtn.y * f.T + v_rtn.z * f.N;
-        }
-
-        template<class EphemerisLike>
-        inline Vec3 burn_dir_inertial_unit_(const EphemerisLike &eph, const std::size_t primary_index, const double t_s,
-                                            const Vec3 &sc_pos_m, const Vec3 &sc_vel_mps, const Vec3 &dir_rtn_unit)
-        {
-            const Vec3 dir_i = rtn_vector_to_inertial_(eph, primary_index, t_s, sc_pos_m, sc_vel_mps, dir_rtn_unit);
-            return normalized_or(dir_i, Vec3{0.0, 0.0, 0.0});
-        }
     } // namespace detail
 
-    /** @brief Convert vector from RTN frame to inertial frame. */
-    inline Vec3 rtn_vector_to_inertial(const CelestialEphemerisSegment &eph, const std::size_t primary_index,
-                                       const double t_s, const Vec3 &sc_pos_m, const Vec3 &sc_vel_mps,
-                                       const Vec3 &v_rtn)
+    /** @brief Convert vector from RTN (computed in a chosen reference frame) to inertial coordinates. */
+    inline Vec3 rtn_vector_to_inertial(const CelestialEphemerisSegment &eph, const std::vector<MassiveBody> &bodies,
+                                       const std::size_t primary_index, const double t_s, const Vec3 &sc_pos_m,
+                                       const Vec3 &sc_vel_mps, const Vec3 &v_rtn,
+                                       const TrajectoryFrameSpec &rtn_frame = {})
     {
-        return detail::rtn_vector_to_inertial_(eph, primary_index, t_s, sc_pos_m, sc_vel_mps, v_rtn);
+        return detail::rtn_vector_to_inertial_in_frame_(eph, bodies, primary_index, t_s, sc_pos_m, sc_vel_mps, v_rtn,
+                                                        rtn_frame);
     }
 
-    inline Vec3 rtn_vector_to_inertial(const CelestialEphemeris &eph, const std::size_t primary_index, const double t_s,
-                                       const Vec3 &sc_pos_m, const Vec3 &sc_vel_mps, const Vec3 &v_rtn)
+    inline Vec3 rtn_vector_to_inertial(const CelestialEphemeris &eph, const std::vector<MassiveBody> &bodies,
+                                       const std::size_t primary_index, const double t_s, const Vec3 &sc_pos_m,
+                                       const Vec3 &sc_vel_mps, const Vec3 &v_rtn,
+                                       const TrajectoryFrameSpec &rtn_frame = {})
     {
-        return detail::rtn_vector_to_inertial_(eph, primary_index, t_s, sc_pos_m, sc_vel_mps, v_rtn);
+        return detail::rtn_vector_to_inertial_in_frame_(eph, bodies, primary_index, t_s, sc_pos_m, sc_vel_mps, v_rtn,
+                                                        rtn_frame);
     }
 
-    /** @brief Convert RTN direction to normalized inertial direction. */
-    inline Vec3 burn_dir_inertial_unit(const CelestialEphemerisSegment &eph, const std::size_t primary_index,
-                                       const double t_s, const Vec3 &sc_pos_m, const Vec3 &sc_vel_mps,
-                                       const Vec3 &dir_rtn_unit)
+    /** @brief Convert RTN direction (computed in a chosen reference frame) to normalized inertial direction. */
+    inline Vec3 burn_dir_inertial_unit(const CelestialEphemerisSegment &eph, const std::vector<MassiveBody> &bodies,
+                                       const std::size_t primary_index, const double t_s, const Vec3 &sc_pos_m,
+                                       const Vec3 &sc_vel_mps, const Vec3 &dir_rtn_unit,
+                                       const TrajectoryFrameSpec &rtn_frame = {})
     {
-        return detail::burn_dir_inertial_unit_(eph, primary_index, t_s, sc_pos_m, sc_vel_mps, dir_rtn_unit);
+        return detail::burn_dir_inertial_unit_in_frame_(eph, bodies, primary_index, t_s, sc_pos_m, sc_vel_mps,
+                                                        dir_rtn_unit, rtn_frame);
     }
 
-    inline Vec3 burn_dir_inertial_unit(const CelestialEphemeris &eph, const std::size_t primary_index, const double t_s,
-                                       const Vec3 &sc_pos_m, const Vec3 &sc_vel_mps, const Vec3 &dir_rtn_unit)
+    inline Vec3 burn_dir_inertial_unit(const CelestialEphemeris &eph, const std::vector<MassiveBody> &bodies,
+                                       const std::size_t primary_index, const double t_s, const Vec3 &sc_pos_m,
+                                       const Vec3 &sc_vel_mps, const Vec3 &dir_rtn_unit,
+                                       const TrajectoryFrameSpec &rtn_frame = {})
     {
-        return detail::burn_dir_inertial_unit_(eph, primary_index, t_s, sc_pos_m, sc_vel_mps, dir_rtn_unit);
+        return detail::burn_dir_inertial_unit_in_frame_(eph, bodies, primary_index, t_s, sc_pos_m, sc_vel_mps,
+                                                        dir_rtn_unit, rtn_frame);
     }
 
     /** @brief Find next impulse time after t_s, or t_end_s if none. */
@@ -337,6 +443,41 @@ namespace orbitsim
             return *this;
         }
 
+        /// @brief Set the reference frame used to compute the RTN basis.
+        BurnBuilder &rtn_frame(const TrajectoryFrameSpec &frame)
+        {
+            seg_.rtn_frame = frame;
+            return *this;
+        }
+
+        /// @brief Compute RTN basis in the simulation inertial frame.
+        BurnBuilder &rtn_inertial()
+        {
+            seg_.rtn_frame = TrajectoryFrameSpec::inertial();
+            return *this;
+        }
+
+        /// @brief Compute RTN basis in a body-centered inertial frame (translation only; no rotation).
+        BurnBuilder &rtn_body_centered_inertial(const BodyId body_id)
+        {
+            seg_.rtn_frame = TrajectoryFrameSpec::body_centered_inertial(body_id);
+            return *this;
+        }
+
+        /// @brief Compute RTN basis in a body-fixed rotating frame (ECEF-style).
+        BurnBuilder &rtn_body_fixed(const BodyId body_id)
+        {
+            seg_.rtn_frame = TrajectoryFrameSpec::body_fixed(body_id);
+            return *this;
+        }
+
+        /// @brief Compute RTN basis in a two-body synodic rotating frame derived from (A,B).
+        BurnBuilder &rtn_synodic(const BodyId body_a_id, const BodyId body_b_id)
+        {
+            seg_.rtn_frame = TrajectoryFrameSpec::synodic(body_a_id, body_b_id);
+            return *this;
+        }
+
         /// @brief Set the target spacecraft.
         BurnBuilder &spacecraft(const SpacecraftId spacecraft_id)
         {
@@ -394,6 +535,41 @@ namespace orbitsim
         ImpulseBuilder &primary(const BodyId primary_body_id)
         {
             seg_.primary_body_id = primary_body_id;
+            return *this;
+        }
+
+        /// @brief Set the reference frame used to compute the RTN basis.
+        ImpulseBuilder &rtn_frame(const TrajectoryFrameSpec &frame)
+        {
+            seg_.rtn_frame = frame;
+            return *this;
+        }
+
+        /// @brief Compute RTN basis in the simulation inertial frame.
+        ImpulseBuilder &rtn_inertial()
+        {
+            seg_.rtn_frame = TrajectoryFrameSpec::inertial();
+            return *this;
+        }
+
+        /// @brief Compute RTN basis in a body-centered inertial frame (translation only; no rotation).
+        ImpulseBuilder &rtn_body_centered_inertial(const BodyId body_id)
+        {
+            seg_.rtn_frame = TrajectoryFrameSpec::body_centered_inertial(body_id);
+            return *this;
+        }
+
+        /// @brief Compute RTN basis in a body-fixed rotating frame (ECEF-style).
+        ImpulseBuilder &rtn_body_fixed(const BodyId body_id)
+        {
+            seg_.rtn_frame = TrajectoryFrameSpec::body_fixed(body_id);
+            return *this;
+        }
+
+        /// @brief Compute RTN basis in a two-body synodic rotating frame derived from (A,B).
+        ImpulseBuilder &rtn_synodic(const BodyId body_a_id, const BodyId body_b_id)
+        {
+            seg_.rtn_frame = TrajectoryFrameSpec::synodic(body_a_id, body_b_id);
             return *this;
         }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "orbitsim/coordinate_frames.hpp"
+#include "orbitsim/frame_spec.hpp"
 #include "orbitsim/synodic.hpp"
 #include "orbitsim/trajectory_types.hpp"
 
@@ -149,6 +150,71 @@ namespace orbitsim
         }
 
         return out;
+    }
+
+    /// @brief Convert inertial trajectory samples into a time-varying frame specified by TrajectoryFrameSpec.
+    ///
+    /// @note The input samples must be inertial (i.e., not already expressed in another frame).
+    inline std::vector<TrajectorySample> trajectory_to_frame_spec(const std::vector<TrajectorySample> &samples_in,
+                                                                  const CelestialEphemeris &eph,
+                                                                  const std::vector<MassiveBody> &bodies,
+                                                                  const TrajectoryFrameSpec &frame)
+    {
+        if (samples_in.empty())
+        {
+            return samples_in;
+        }
+
+        const auto body_by_id = [&](const BodyId id) -> const MassiveBody * {
+            if (id == kInvalidBodyId)
+            {
+                return nullptr;
+            }
+            for (const auto &b: bodies)
+            {
+                if (b.id == id)
+                {
+                    return &b;
+                }
+            }
+            return nullptr;
+        };
+
+        switch (frame.type)
+        {
+        case TrajectoryFrameType::Inertial:
+            return samples_in;
+        case TrajectoryFrameType::BodyCenteredInertial:
+        {
+            const MassiveBody *body = body_by_id(frame.primary_body_id);
+            if (body == nullptr)
+            {
+                return {};
+            }
+            return trajectory_to_body_centered_inertial(samples_in, eph, *body);
+        }
+        case TrajectoryFrameType::BodyFixed:
+        {
+            const MassiveBody *body = body_by_id(frame.primary_body_id);
+            if (body == nullptr)
+            {
+                return {};
+            }
+            return trajectory_to_body_fixed(samples_in, eph, *body);
+        }
+        case TrajectoryFrameType::Synodic:
+        {
+            const MassiveBody *body_a = body_by_id(frame.primary_body_id);
+            const MassiveBody *body_b = body_by_id(frame.secondary_body_id);
+            if (body_a == nullptr || body_b == nullptr)
+            {
+                return {};
+            }
+            return trajectory_to_synodic(samples_in, eph, *body_a, *body_b);
+        }
+        }
+
+        return samples_in;
     }
 
 } // namespace orbitsim
