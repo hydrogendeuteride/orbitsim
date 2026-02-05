@@ -14,6 +14,8 @@
 #include "orbitsim/game_sim.hpp"
 #include "orbitsim/maneuvers.hpp"
 #include "orbitsim/orbit_utils.hpp"
+#include "orbitsim/spacecraft_lookup.hpp"
+#include "orbitsim/spacecraft_state_cache.hpp"
 #include "orbitsim/time_utils.hpp"
 #include "orbitsim/trajectories.hpp"
 #include "orbitsim/trajectory_transforms.hpp"

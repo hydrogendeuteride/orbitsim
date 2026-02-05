@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 namespace orbitsim::detail
@@ -89,13 +90,15 @@ namespace orbitsim::detail
      * @param spacecraft_integrator DOPRI5 options
      * @param t0_s Start time
      * @param dt_s Integration interval (can be negative)
+     * @param sc_lookup Optional callback to look up other spacecraft states for LVLH frame
      * @return Updated spacecraft with new state and reduced propellant
      */
     template<class EphemerisLike>
     inline Spacecraft propagate_spacecraft_in_ephemeris(
             const Spacecraft &sc0, const std::vector<MassiveBody> &bodies, const EphemerisLike &eph,
             const ManeuverPlan &plan, const double gravitational_constant, const double softening_length_m,
-            const DOPRI5Options &spacecraft_integrator, const double t0_s, const double dt_s)
+            const DOPRI5Options &spacecraft_integrator, const double t0_s, const double dt_s,
+            const SpacecraftStateLookup &sc_lookup = nullptr)
     {
         Spacecraft out = sc0;
         if (!(dt_s != 0.0) || !std::isfinite(dt_s))
@@ -147,36 +150,36 @@ namespace orbitsim::detail
             return false;
         };
 
+        auto auto_primary_at = [&](const double t_s, const Vec3 &pos_m) -> std::size_t {
+            return auto_select_primary_index(
+                    bodies, pos_m, [&](std::size_t i) { return eph.body_position_at(i, t_s); }, softening_length_m);
+        };
+
         auto primary_for = [&](const BurnSegment &seg, const double t_s, const Vec3 &pos_m) -> std::size_t {
             std::size_t primary_index = 0;
             if (body_index_for_id(seg.primary_body_id, &primary_index))
             {
                 return primary_index;
             }
-            if (bodies.empty())
+
+            if (seg.rtn_frame.type == TrajectoryFrameType::LVLH)
             {
-                return 0;
+                if (body_index_for_id(seg.rtn_frame.primary_body_id, &primary_index))
+                {
+                    return primary_index;
+                }
+
+                if (sc_lookup)
+                {
+                    const std::optional<State> target_state = sc_lookup(seg.rtn_frame.target_spacecraft_id, t_s);
+                    if (target_state.has_value())
+                    {
+                        return auto_primary_at(t_s, target_state->position_m);
+                    }
+                }
             }
 
-            const double eps2 = softening_length_m * softening_length_m;
-            std::size_t best = 0;
-            double best_a = -1.0;
-            for (std::size_t i = 0; i < bodies.size(); ++i)
-            {
-                const Vec3 dr = eph.body_position_at(i, t_s) - pos_m;
-                const double r2 = glm::dot(dr, dr) + eps2;
-                if (!(r2 > 0.0) || !std::isfinite(r2))
-                {
-                    continue;
-                }
-                const double amag = (gravitational_constant * bodies[i].mass_kg) / r2;
-                if (amag > best_a)
-                {
-                    best_a = amag;
-                    best = i;
-                }
-            }
-            return best;
+            return auto_primary_at(t_s, pos_m);
         };
 
         auto primary_for_impulse = [&](const ImpulseSegment &seg, const double t_s, const Vec3 &pos_m) -> std::size_t {
@@ -185,30 +188,25 @@ namespace orbitsim::detail
             {
                 return primary_index;
             }
-            if (bodies.empty())
+
+            if (seg.rtn_frame.type == TrajectoryFrameType::LVLH)
             {
-                return 0;
+                if (body_index_for_id(seg.rtn_frame.primary_body_id, &primary_index))
+                {
+                    return primary_index;
+                }
+
+                if (sc_lookup)
+                {
+                    const std::optional<State> target_state = sc_lookup(seg.rtn_frame.target_spacecraft_id, t_s);
+                    if (target_state.has_value())
+                    {
+                        return auto_primary_at(t_s, target_state->position_m);
+                    }
+                }
             }
 
-            const double eps2 = softening_length_m * softening_length_m;
-            std::size_t best = 0;
-            double best_a = -1.0;
-            for (std::size_t i = 0; i < bodies.size(); ++i)
-            {
-                const Vec3 dr = eph.body_position_at(i, t_s) - pos_m;
-                const double r2 = glm::dot(dr, dr) + eps2;
-                if (!(r2 > 0.0) || !std::isfinite(r2))
-                {
-                    continue;
-                }
-                const double amag = (gravitational_constant * bodies[i].mass_kg) / r2;
-                if (amag > best_a)
-                {
-                    best_a = amag;
-                    best = i;
-                }
-            }
-            return best;
+            return auto_primary_at(t_s, pos_m);
         };
 
         auto apply_impulses_at = [&](const double t_s, const Vec3 &pos_m, const Vec3 &vel_mps) -> Vec3 {
@@ -236,7 +234,7 @@ namespace orbitsim::detail
                     continue;
                 }
                 const std::size_t primary = primary_for_impulse(imp, t_s, pos_m);
-                dv_i += rtn_vector_to_inertial(eph, bodies, primary, t_s, pos_m, vel_mps, imp.dv_rtn_mps, imp.rtn_frame);
+                dv_i += rtn_vector_to_inertial(eph, bodies, primary, t_s, pos_m, vel_mps, imp.dv_rtn_mps, imp.rtn_frame, sc_lookup);
             }
             return dv_i;
         };
@@ -310,7 +308,7 @@ namespace orbitsim::detail
                     return a;
                 }
 
-                const Vec3 dir_i = burn_dir_inertial_unit(eph, bodies, primary, t_eval_s, pos_m, vel_mps, dir_rtn, rtn_frame);
+                const Vec3 dir_i = burn_dir_inertial_unit(eph, bodies, primary, t_eval_s, pos_m, vel_mps, dir_rtn, rtn_frame, sc_lookup);
                 const double dir2 = glm::dot(dir_i, dir_i);
                 if (!(dir2 > 0.0) || !std::isfinite(dir2))
                 {

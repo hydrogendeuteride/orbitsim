@@ -93,7 +93,8 @@ namespace orbitsim
                 const Vec3 &plane_normal_unit_i,
                 const SpacecraftId target_spacecraft_id,
                 const EventOptions &opt,
-                Propagator propagate_sc)
+                Propagator propagate_sc,
+                Spacecraft *out_sc1 = nullptr)
         {
             if (!(dt_s > 0.0) || !std::isfinite(dt_s) || !(opt.max_bisect_iters > 0))
             {
@@ -121,6 +122,10 @@ namespace orbitsim
             };
 
             const Spacecraft sc1 = propagate_sc(sc0, t0_s, dt_s);
+            if (out_sc1 != nullptr)
+            {
+                *out_sc1 = sc1;
+            }
             const double f0 = signed_dist_m(sc0, t0_s);
             const double f1 = signed_dist_m(sc1, t1_s);
             if (!std::isfinite(f0) || !std::isfinite(f1))

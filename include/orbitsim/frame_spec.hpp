@@ -17,6 +17,7 @@ namespace orbitsim
         BodyCenteredInertial,
         BodyFixed,
         Synodic,
+        LVLH, ///< Local Vertical Local Horizontal frame relative to a spacecraft
     };
 
     /**
@@ -26,6 +27,7 @@ namespace orbitsim
      * - BodyCenteredInertial: translation to a body's instantaneous state (no rotation).
      * - BodyFixed: body-fixed rotating frame derived from the body's spin state.
      * - Synodic: two-body barycentric co-rotating frame for (A,B) with +X along A->B.
+     * - LVLH: Local Vertical Local Horizontal frame centered on a target spacecraft.
      */
     struct TrajectoryFrameSpec
     {
@@ -35,6 +37,8 @@ namespace orbitsim
         BodyId primary_body_id{kInvalidBodyId};
         /// Secondary body id (used only by Synodic as body B).
         BodyId secondary_body_id{kInvalidBodyId};
+        /// Target spacecraft id (used by LVLH frame).
+        SpacecraftId target_spacecraft_id{kInvalidSpacecraftId};
 
         static TrajectoryFrameSpec inertial() { return {}; }
 
@@ -53,6 +57,14 @@ namespace orbitsim
             return TrajectoryFrameSpec{.type = TrajectoryFrameType::Synodic,
                                        .primary_body_id = body_a_id,
                                        .secondary_body_id = body_b_id};
+        }
+
+        /// @brief LVLH frame centered on a target spacecraft, with RTN computed relative to a primary body.
+        static TrajectoryFrameSpec lvlh(const SpacecraftId target_sc_id, const BodyId primary_body_id = kInvalidBodyId)
+        {
+            return TrajectoryFrameSpec{.type = TrajectoryFrameType::LVLH,
+                                       .primary_body_id = primary_body_id,
+                                       .target_spacecraft_id = target_sc_id};
         }
     };
 

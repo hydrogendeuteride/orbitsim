@@ -2,9 +2,11 @@
 
 #include "orbitsim/coordinate_frames.hpp"
 #include "orbitsim/frame_spec.hpp"
+#include "orbitsim/spacecraft_lookup.hpp"
 #include "orbitsim/synodic.hpp"
 #include "orbitsim/trajectory_types.hpp"
 
+#include <cmath>
 #include <optional>
 #include <vector>
 
@@ -158,7 +160,8 @@ namespace orbitsim
     inline std::vector<TrajectorySample> trajectory_to_frame_spec(const std::vector<TrajectorySample> &samples_in,
                                                                   const CelestialEphemeris &eph,
                                                                   const std::vector<MassiveBody> &bodies,
-                                                                  const TrajectoryFrameSpec &frame)
+                                                                  const TrajectoryFrameSpec &frame,
+                                                                  const SpacecraftStateLookup &sc_lookup = nullptr)
     {
         if (samples_in.empty())
         {
@@ -211,6 +214,103 @@ namespace orbitsim
                 return {};
             }
             return trajectory_to_synodic(samples_in, eph, *body_a, *body_b);
+        }
+        case TrajectoryFrameType::LVLH:
+        {
+            if (!sc_lookup)
+            {
+                return {};
+            }
+            if (frame.target_spacecraft_id == kInvalidSpacecraftId)
+            {
+                return {};
+            }
+            if (bodies.empty())
+            {
+                return {};
+            }
+
+            const MassiveBody *primary_fixed = body_by_id(frame.primary_body_id);
+
+            std::vector<std::optional<std::size_t>> eph_indices;
+            if (!eph.empty())
+            {
+                eph_indices.reserve(bodies.size());
+                for (const auto &b: bodies)
+                {
+                    std::size_t idx = 0;
+                    if (eph.body_index_for_id(b.id, &idx))
+                    {
+                        eph_indices.push_back(idx);
+                    }
+                    else
+                    {
+                        eph_indices.push_back(std::nullopt);
+                    }
+                }
+            }
+
+            std::vector<TrajectorySample> out;
+            out.reserve(samples_in.size());
+
+            for (const auto &s: samples_in)
+            {
+                const std::optional<State> target_state = sc_lookup(frame.target_spacecraft_id, s.t_s);
+                if (!target_state.has_value())
+                {
+                    return {};
+                }
+
+                const MassiveBody *primary = primary_fixed;
+                std::optional<std::size_t> primary_eph_index;
+
+                if (primary == nullptr)
+                {
+                    const std::size_t best = auto_select_primary_index(
+                            bodies, target_state->position_m,
+                            [&](std::size_t i) -> Vec3 {
+                                if (!eph.empty() && i < eph_indices.size() && eph_indices[i].has_value())
+                                    return eph.body_position_at(*eph_indices[i], s.t_s);
+                                return bodies[i].state.position_m;
+                            });
+
+                    primary = &bodies[best];
+                    if (!eph.empty() && best < eph_indices.size())
+                    {
+                        primary_eph_index = eph_indices[best];
+                    }
+                }
+                else if (!eph.empty())
+                {
+                    for (std::size_t i = 0; i < bodies.size(); ++i)
+                    {
+                        if (bodies[i].id == primary->id)
+                        {
+                            if (i < eph_indices.size())
+                            {
+                                primary_eph_index = eph_indices[i];
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                const State primary_state = [&]() -> State {
+                    if (eph.empty() || !primary_eph_index.has_value())
+                    {
+                        return primary->state;
+                    }
+                    return eph.body_state_at(*primary_eph_index, s.t_s);
+                }();
+                const std::optional<RotatingFrame> lvlh = make_lvlh_frame(primary_state, *target_state);
+                if (!lvlh.has_value())
+                {
+                    return {};
+                }
+                out.push_back(inertial_sample_to_frame(s, *lvlh));
+            }
+
+            return out;
         }
         }
 

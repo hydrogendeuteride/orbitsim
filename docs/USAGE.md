@@ -23,7 +23,7 @@ A header-only C++20 orbit simulation library for KSP-style games.
 
 This is a header-only library. Simply add the `include/` directory to your project.
 
-```cpp
+```c++
 #include <orbitsim/orbitsim.hpp>
 ```
 
@@ -60,7 +60,7 @@ This separation allows spacecraft to have accurate trajectories without affectin
 
 ### SpinState - Rotation State
 
-```cpp
+```c++
 using namespace orbitsim;
 
 // Create spin state
@@ -73,7 +73,7 @@ SpinState spin = make_spin(
 
 ### State - Position/Velocity/Spin
 
-```cpp
+```c++
 State state = make_state(
     Vec3{1.5e11, 0.0, 0.0},     // Position [m]
     Vec3{0.0, 29780.0, 0.0},    // Velocity [m/s]
@@ -83,7 +83,7 @@ State state = make_state(
 
 ### MassiveBody - Celestial Body
 
-```cpp
+```c++
 MassiveBody earth;
 earth.mass_kg = 5.972e24;
 earth.radius_m = 6.371e6;
@@ -98,7 +98,7 @@ earth.state = make_state(
 
 ### Engine
 
-```cpp
+```c++
 Engine engine;
 engine.max_thrust_N = 10000.0;  // Maximum thrust [N]
 engine.isp_s = 320.0;            // Specific impulse [s]
@@ -107,7 +107,7 @@ engine.min_throttle_0_1 = 0.1;   // Minimum throttle [0-1]
 
 ### Spacecraft
 
-```cpp
+```c++
 Spacecraft ship;
 ship.state = make_state(
     Vec3{1.5e11 + 6.771e6, 0.0, 0.0},  // LEO position
@@ -124,7 +124,7 @@ ship.engines.push_back(engine);
 
 ### Creating GameSimulation
 
-```cpp
+```c++
 GameSimulation::Config cfg;
 cfg.gravitational_constant = kGravitationalConstant_SI;  // 6.67430e-11
 cfg.softening_length_m = 0.0;                             // N-body softening
@@ -135,7 +135,7 @@ GameSimulation sim(cfg);
 
 ### Adding Bodies
 
-```cpp
+```c++
 // Automatic ID assignment (recommended)
 auto earth_h = sim.create_body(earth);
 if (!earth_h.valid()) {
@@ -153,7 +153,7 @@ BodyId moon_id = moon_h.id;
 
 ### Adding Spacecraft
 
-```cpp
+```c++
 auto ship_h = sim.create_spacecraft(ship);
 if (!ship_h.valid()) {
     // handle error
@@ -169,7 +169,7 @@ For rails or time-jump workflows where states are advanced externally:
 - `set_body_state(id, state)`: Replaces the inertial state of a massive body.
 - `set_spacecraft_state(id, state)`: Replaces the inertial state of a spacecraft; also resets proximity tracking.
 
-```cpp
+```c++
 // Set simulation time (does not modify body/spacecraft states)
 sim.set_time_s(hours(10.0));
 
@@ -190,7 +190,7 @@ ok = sim.set_spacecraft_state(ship_id, new_ship_state);
 
 ### Running the Simulation
 
-```cpp
+```c++
 // Simple step (no events)
 sim.step(10.0);  // Advance 10 seconds
 
@@ -208,7 +208,7 @@ for (const Event& e : events) {
 
 ### Time Utilities
 
-```cpp
+```c++
 #include <orbitsim/time_utils.hpp>
 
 double t1 = seconds(60.0);    // 60 seconds
@@ -232,7 +232,7 @@ Maneuvers are defined in the RTN (Radial-Tangential-Normal) frame:
 
 ### Direction Constants
 
-```cpp
+```c++
 kPrograde     // +T: velocity direction
 kRetrograde   // -T: opposite to velocity
 kRadialOut    // +R: away from center
@@ -243,7 +243,7 @@ kAntiNormal   // -N: opposite to normal
 
 ### BurnSegment - Finite Duration Burn
 
-```cpp
+```c++
 // Method 1: Direct creation
 BurnSegment burn;
 burn.t_start_s = hours(1.0);
@@ -281,7 +281,7 @@ auto burn6 = burn()
 
 ### ImpulseSegment - Instantaneous Delta-v
 
-```cpp
+```c++
 // Direct creation
 ImpulseSegment imp;
 imp.t_s = hours(1.0);
@@ -295,24 +295,32 @@ auto imp2 = impulse()
     .spacecraft(ship_id)
     .build();
 
-// Optional: compute the RTN basis in a chosen reference frame (default: inertial).
-auto imp4 = impulse()
+// Arbitrary direction + magnitude
+auto imp3 = impulse()
     .time(hours(2.5))
+    .direction(Vec3{1.0, 2.0, 0.5}, 100.0)  // direction + 100 m/s magnitude
+    .spacecraft(ship_id)
+    .build();
+
+// Combined RTN components
+auto imp4 = impulse()
+    .time(hours(3.0))
+    .dv_rtn(Vec3{10.0, 50.0, -5.0})  // R=10, T=50, N=-5 m/s
+    .build();
+
+// Optional: compute the RTN basis in a chosen reference frame (default: inertial).
+auto imp5 = impulse()
+    .time(hours(3.5))
     .prograde(150.0)
     .primary(earth_id)
     .rtn_synodic(earth_id, moon_id)
     .spacecraft(ship_id)
     .build();
-
-auto imp3 = impulse()
-    .time(hours(3.0))
-    .dv_rtn(Vec3{10.0, 50.0, -5.0})  // Combined direction
-    .build();
 ```
 
 ### ManeuverPlan
 
-```cpp
+```c++
 ManeuverPlan& plan = sim.maneuver_plan();
 
 // Add burn segments
@@ -328,13 +336,49 @@ plan.impulses.push_back(
 sort_plan(plan);
 ```
 
+### LVLH Frame - Proximity/Rendezvous Operations
+
+The LVLH (Local Vertical Local Horizontal) frame allows you to define maneuvers relative to another spacecraft's RTN coordinate system. This is useful for rendezvous, docking, and proximity operations.
+
+```c++
+// Chaser spacecraft maneuvers in target's LVLH frame
+auto rendezvous_burn = burn()
+    .start(t_tig)
+    .duration(30.0)
+    .direction(Vec3{0.0, 0.0, -1.0})  // -R in target's frame (toward target)
+    .rtn_lvlh(target_sc_id, earth_id)  // Use target's LVLH, Earth as primary
+    .spacecraft(chaser_sc_id)
+    .build();
+
+// Impulse in target's prograde direction
+auto imp = impulse()
+    .time(t_burn)
+    .prograde(10.0)  // Target's +T direction
+    .rtn_lvlh(target_sc_id)  // Primary auto-selected
+    .spacecraft(chaser_sc_id)
+    .build();
+
+// Reduce relative velocity (retrograde braking)
+auto braking = impulse()
+    .time(t_approach)
+    .retrograde(5.0)  // Target's -T direction
+    .rtn_lvlh(target_sc_id, earth_id)
+    .spacecraft(chaser_sc_id)
+    .build();
+```
+
+**LVLH Frame Characteristics:**
+- RTN basis computed from target spacecraft's position/velocity relative to primary body
+- Target's state is evaluated in real-time during burns
+- If target `spacecraft_id` is invalid, the maneuver has no effect (returns zero vector)
+
 ---
 
 ## Event Detection
 
 ### Event Types
 
-```cpp
+```c++
 enum class EventType {
     Impact,              // Surface collision
     AtmosphereBoundary,  // Atmosphere entry/exit
@@ -350,7 +394,7 @@ enum class Crossing {
 
 ### Event Options
 
-```cpp
+```c++
 EventOptions opt;
 opt.time_tol_s = 1e-3;             // Time tolerance
 opt.dist_tol_m = 1e-2;             // Distance tolerance
@@ -360,7 +404,7 @@ opt.max_event_splits_per_step = 8; // Maximum splits per step
 
 ### Proximity Event Configuration
 
-```cpp
+```c++
 GameSimulation::Config cfg;
 cfg.proximity.enable = true;
 cfg.proximity.center_spacecraft_id = main_ship_id;  // Center spacecraft
@@ -370,7 +414,7 @@ cfg.proximity.exit_radius_m = 1200.0;               // Exit radius (hysteresis)
 
 ### Event Handling Example
 
-```cpp
+```c++
 std::vector<Event> events;
 sim.step(hours(1.0), &events);
 
@@ -404,7 +448,7 @@ for (const Event& e : events) {
 
 ### Creating Ephemeris
 
-```cpp
+```c++
 TrajectoryOptions opts;
 opts.duration_s = days(10.0);        // Prediction duration
 opts.sample_dt_s = minutes(10.0);    // Sampling interval
@@ -425,7 +469,7 @@ CelestialEphemeris eph = build_celestial_ephemeris(sim, opts);
 
 ### Predicting Body Trajectories
 
-```cpp
+```c++
 // Sample future trajectory of a celestial body
 std::vector<TrajectorySample> earth_traj =
     predict_body_trajectory(sim, eph, earth_id, opts);
@@ -449,7 +493,7 @@ auto ship_syn_traj = trajectory_to_frame_spec(ship_traj_inertial, eph, sim.massi
 
 ### Predicting Spacecraft Trajectories
 
-```cpp
+```c++
 std::vector<TrajectorySample> ship_traj =
     predict_spacecraft_trajectory(sim, eph, ship_id, opts);
 
@@ -460,7 +504,7 @@ auto ship_rel = trajectory_to_frame_spec(ship_traj, eph, sim.massive_bodies(), e
 
 ### Predicting Spacecraft Events
 
-```cpp
+```c++
 std::vector<Event> future_events =
     predict_spacecraft_events(sim, eph, ship_id, opts);
 
@@ -471,7 +515,7 @@ for (const Event& e : future_events) {
 
 ### Predicting Orbital Nodes
 
-```cpp
+```c++
 // Equatorial plane crossing nodes (ascending/descending)
 std::vector<NodeEvent> eq_nodes =
     predict_equatorial_nodes(sim, eph, ship_id, earth_id, opts);
@@ -493,7 +537,7 @@ std::vector<NodeEvent> target_nodes =
 
 ### RotatingFrame
 
-```cpp
+```c++
 // Body-centered inertial frame (ECI)
 RotatingFrame eci = make_body_centered_inertial_frame(earth);
 
@@ -512,7 +556,7 @@ if (lvlh_opt.has_value()) {
 
 ### Coordinate Transformations
 
-```cpp
+```c++
 // Inertial -> Rotating frame
 Vec3 pos_frame = inertial_position_to_frame(ecef, pos_inertial);
 Vec3 vec_frame = inertial_vector_to_frame(ecef, vec_inertial);
@@ -528,7 +572,7 @@ State state_inertial = frame_state_to_inertial(state_frame, ecef);
 
 A rotating frame for two-body systems.
 
-```cpp
+```c++
 // Create synodic frame (Earth-Moon)
 auto synodic_opt = make_synodic_frame(earth, moon);
 if (synodic_opt.has_value()) {
@@ -546,7 +590,7 @@ auto synodic_traj = trajectory_to_synodic(inertial_traj, eph, earth, moon);
 
 ### Trajectory Frame Conversion (ECI/ECEF, etc.)
 
-```cpp
+```c++
 // Note: input samples must be inertial (not already origin-offset).
 
 // Body-centered inertial frame (often called "ECI" for Earth)
@@ -562,7 +606,7 @@ auto ecef_traj2 = trajectory_to_ecef(inertial_traj, eph, earth);
 
 ### Lagrange Point Calculation
 
-```cpp
+```c++
 auto lp_opt = cr3bp_lagrange_points_m(synodic_frame);
 if (lp_opt.has_value()) {
     Cr3bpLagrangePoints lp = *lp_opt;
@@ -576,7 +620,7 @@ if (lp_opt.has_value()) {
 
 ### Geodetic Coordinates
 
-```cpp
+```c++
 auto ecef_opt = make_body_fixed_frame(earth);
 if (ecef_opt.has_value()) {
     // Inertial position -> Geodetic coordinates
@@ -598,7 +642,7 @@ if (ecef_opt.has_value()) {
 
 ### NED Frame
 
-```cpp
+```c++
 // North-East-Down local frame
 auto ned_opt = make_ned_frame(*ecef_opt, coord, earth.radius_m);
 if (ned_opt.has_value()) {
@@ -613,7 +657,7 @@ if (ned_opt.has_value()) {
 
 ### Circular Orbit State Computation
 
-```cpp
+```c++
 // Circular orbit relative state
 RelativeOrbitState rel = circular_orbit_relative_state(
     earth.mass_kg,     // Central body mass
@@ -634,7 +678,7 @@ TwoBodyBarycentricStates bary = two_body_circular_barycentric(
 
 ### Keplerian Orbital Elements
 
-```cpp
+```c++
 // State -> Orbital elements
 double mu = kGravitationalConstant_SI * earth.mass_kg;
 OrbitalElements el = orbital_elements_from_relative_state(mu, r_rel, v_rel);
@@ -654,7 +698,7 @@ double ma = el.mean_anomaly_rad;      // Mean anomaly
 
 ### State from Orbital Elements
 
-```cpp
+```c++
 OrbitalElements el;
 el.semi_major_axis_m = 7000000.0;
 el.eccentricity = 0.01;
@@ -669,7 +713,7 @@ State abs_state = state_from_orbital_elements(mu, earth.state, el);
 
 ### Orbital Scalars
 
-```cpp
+```c++
 OrbitScalars scalars = orbit_scalars_from_elements(mu, el);
 double periapsis = scalars.periapsis_radius_m;  // Periapsis radius
 double apoapsis = scalars.apoapsis_radius_m;    // Apoapsis radius
@@ -679,7 +723,7 @@ double n = scalars.mean_motion_radps;           // Mean motion
 
 ### Apsides Calculation
 
-```cpp
+```c++
 OrbitApsides apsides = apsides_from_relative_state(mu, r_rel, v_rel);
 if (apsides.valid) {
     Vec3 pe_pos = apsides.periapsis_rel_m;       // Periapsis position
@@ -696,7 +740,7 @@ if (apsides.valid) {
 
 Used for fast two-body orbit propagation.
 
-```cpp
+```c++
 KeplerOptions opt;
 opt.max_iterations = 64;
 opt.abs_tolerance = 1e-12;
@@ -719,7 +763,7 @@ if (result.converged) {
 
 For rails/patched-conics timewarp, select the appropriate primary body based on SOI:
 
-```cpp
+```c++
 #include <orbitsim/soi.hpp>
 
 // Configure SOI switching options
@@ -754,7 +798,7 @@ Computes the required velocities given two positions and time-of-flight.
 
 ### Basic Usage
 
-```cpp
+```c++
 LambertOptions opt;
 opt.prograde = true;       // Prograde orbit
 opt.short_path = true;     // Short path
@@ -784,7 +828,7 @@ for (const auto& sol : solutions) {
 
 ### Multi-Revolution Solutions
 
-```cpp
+```c++
 LambertOptions opt;
 opt.max_revolutions = 3;  // Up to 3 revolutions
 
@@ -796,7 +840,7 @@ auto solutions = solve_lambert_universal(mu, r1, r2, tof, opt);
 
 ## Example: Complete Simulation
 
-```cpp
+```c++
 #include <orbitsim/orbitsim.hpp>
 #include <iostream>
 
@@ -886,7 +930,8 @@ int main() {
 |--------|--------------|
 | `types.hpp` | Basic types (Vec3, State, MassiveBody, Spacecraft) |
 | `game_sim.hpp` | GameSimulation class |
-| `maneuvers.hpp` | BurnSegment, ImpulseSegment, ManeuverPlan |
+| `maneuvers.hpp` | BurnSegment, ImpulseSegment, ManeuverPlan, LVLH frame |
+| `frame_spec.hpp` | TrajectoryFrameSpec (Inertial, BCI, BodyFixed, Synodic, LVLH) |
 | `events.hpp` | Event, EventType, EventOptions |
 | `trajectory_types.hpp` | TrajectorySample types |
 | `trajectories.hpp` | Trajectory prediction functions |

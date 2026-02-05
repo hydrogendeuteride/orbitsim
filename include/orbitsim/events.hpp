@@ -39,6 +39,39 @@ namespace orbitsim
         SpacecraftId other_spacecraft_id{kInvalidSpacecraftId}; ///< Other spacecraft (Proximity only)
     };
 
+    /// @brief Types of maneuver timeline events.
+    enum class ManeuverEventType
+    {
+        BurnStart,
+        BurnEnd,
+        Impulse,
+    };
+
+    /// @brief Event describing a burn boundary or impulse time from a ManeuverPlan.
+    struct ManeuverEvent
+    {
+        double t_event_s{0.0};
+        ManeuverEventType type{ManeuverEventType::BurnStart};
+        SpacecraftId spacecraft_id{kInvalidSpacecraftId};
+        std::size_t index{0}; ///< Index into plan.segments (BurnStart/BurnEnd) or plan.impulses (Impulse)
+    };
+
+    /// @brief Type of apsis event relative to a primary body.
+    enum class ApsisKind
+    {
+        Periapsis, ///< Local minimum of distance to primary
+        Apoapsis, ///< Local maximum of distance to primary
+    };
+
+    /// @brief Event describing a local distance extremum (apsis) relative to a primary body.
+    struct ApsisEvent
+    {
+        double t_event_s{0.0};
+        BodyId primary_body_id{kInvalidBodyId};
+        SpacecraftId spacecraft_id{kInvalidSpacecraftId};
+        ApsisKind kind{ApsisKind::Periapsis};
+    };
+
     /** @brief Parameters for event detection algorithms. */
     struct EventOptions
     {
@@ -143,6 +176,8 @@ namespace orbitsim
      * Uses bisection to refine the crossing time when a sign change in
      * (distance - threshold) is detected between interval endpoints.
      *
+     * Optionally returns the propagated spacecraft endpoint state at `t0_s + dt_s` via out_sc1.
+     *
      * @tparam Propagator Callable: (sc0, t0_s, dt_s) -> Spacecraft
      * @param bodies All massive bodies to check against
      * @param eph Ephemeris segment for body positions
@@ -152,13 +187,15 @@ namespace orbitsim
      * @param plan Maneuver plan (currently unused, reserved)
      * @param opt Event detection options
      * @param propagate_sc Propagator function to get spacecraft state at any time
+     * @param out_sc1 If non-null, receives propagated spacecraft state at t0_s + dt_s
      * @return Earliest event if any crossing detected, nullopt otherwise
      */
     template<class Propagator>
     inline std::optional<Event>
     find_earliest_event_in_interval(const std::vector<MassiveBody> &bodies, const CelestialEphemerisSegment &eph,
                                     const Spacecraft &sc0, const double t0_s, const double dt_s,
-                                    const ManeuverPlan &plan, const EventOptions &opt, Propagator propagate_sc)
+                                    const ManeuverPlan &plan, const EventOptions &opt, Propagator propagate_sc,
+                                    Spacecraft *out_sc1 = nullptr)
     {
         (void) plan;
         if (!(dt_s > 0.0) || !std::isfinite(dt_s) || !(opt.max_bisect_iters > 0))
@@ -174,6 +211,10 @@ namespace orbitsim
         };
 
         const Spacecraft sc1 = propagate_sc(sc0, t0_s, dt_s);
+        if (out_sc1 != nullptr)
+        {
+            *out_sc1 = sc1;
+        }
 
         std::optional<Event> best;
         for (std::size_t body_index = 0; body_index < bodies.size(); ++body_index)
@@ -233,6 +274,8 @@ namespace orbitsim
      * Detects when the distance between center and target spacecraft crosses
      * the given threshold. Uses bisection for precise crossing time.
      *
+     * Optionally returns propagated endpoint states at `t0_s + dt_s` via out_center1/out_target1.
+     *
      * @tparam Propagator Callable: (sc0, t0_s, dt_s) -> Spacecraft
      * @param eph Ephemeris segment (for body positions if needed)
      * @param center0 Reference spacecraft at t0_s
@@ -242,6 +285,8 @@ namespace orbitsim
      * @param threshold_m Distance threshold for event
      * @param opt Event detection options
      * @param propagate_sc Propagator function
+     * @param out_center1 If non-null, receives propagated center state at t0_s + dt_s
+     * @param out_target1 If non-null, receives propagated target state at t0_s + dt_s
      * @return Proximity event if crossing detected, nullopt otherwise
      */
     template<class Propagator>
@@ -249,7 +294,8 @@ namespace orbitsim
     find_earliest_proximity_event_in_interval(const CelestialEphemerisSegment &eph, const Spacecraft &center0,
                                               const Spacecraft &target0, const double t0_s, const double dt_s,
                                               const double threshold_m, const EventOptions &opt,
-                                              Propagator propagate_sc)
+                                              Propagator propagate_sc, Spacecraft *out_center1 = nullptr,
+                                              Spacecraft *out_target1 = nullptr)
     {
         if (!(dt_s > 0.0) || !std::isfinite(dt_s) || !(threshold_m > 0.0) || !std::isfinite(threshold_m) ||
             !(opt.max_bisect_iters > 0))
@@ -267,6 +313,14 @@ namespace orbitsim
 
         const Spacecraft center1 = propagate_sc(center0, t0_s, dt_s);
         const Spacecraft target1 = propagate_sc(target0, t0_s, dt_s);
+        if (out_center1 != nullptr)
+        {
+            *out_center1 = center1;
+        }
+        if (out_target1 != nullptr)
+        {
+            *out_target1 = target1;
+        }
 
         const double d0 = dist_m(t0_s, center0.state.position_m, target0.state.position_m);
         const double d1 = dist_m(t1_s, center1.state.position_m, target1.state.position_m);

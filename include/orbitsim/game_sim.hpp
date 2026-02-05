@@ -6,6 +6,7 @@
 #include "orbitsim/integrators.hpp"
 #include "orbitsim/maneuvers.hpp"
 #include "orbitsim/math.hpp"
+#include "orbitsim/spacecraft_state_cache.hpp"
 #include "orbitsim/types.hpp"
 
 #include <algorithm>
@@ -469,16 +470,21 @@ namespace orbitsim
                 preview_step_no_events_(massive_preview, spacecraft_preview, t_preview, remaining, &eph_preview);
 
                 std::optional<Event> best;
+                std::vector<Spacecraft> spacecraft_end(spacecraft_.size());
+
+                auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
+                                        const double dt_sc_s) -> Spacecraft {
+                    return propagate_spacecraft_(sc_start, eph_preview, t0_s, dt_sc_s, spacecraft_);
+                };
 
                 // Boundary events (impact/atmosphere/SOI) for all spacecraft.
-                for (const auto &sc: spacecraft_)
+                for (std::size_t sc_index = 0; sc_index < spacecraft_.size(); ++sc_index)
                 {
-                    auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
-                                            const double dt_sc_s) -> Spacecraft {
-                        return propagate_spacecraft_(sc_start, eph_preview, t0_s, dt_sc_s);
-                    };
+                    const Spacecraft &sc = spacecraft_[sc_index];
+                    Spacecraft sc1{};
                     const std::optional<Event> e = find_earliest_event_in_interval(
-                            massive_, eph_preview, sc, time_s_, remaining, plan_, cfg_.events, propagate_sc);
+                            massive_, eph_preview, sc, time_s_, remaining, plan_, cfg_.events, propagate_sc, &sc1);
+                    spacecraft_end[sc_index] = sc1;
                     if (e.has_value() && (!best.has_value() || e->t_event_s < best->t_event_s))
                     {
                         best = e;
@@ -492,10 +498,12 @@ namespace orbitsim
                     if (center_ptr != nullptr)
                     {
                         const Spacecraft center0 = *center_ptr;
-                        auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
-                                                const double dt_sc_s) -> Spacecraft {
-                            return propagate_spacecraft_(sc_start, eph_preview, t0_s, dt_sc_s);
-                        };
+                        const auto center_it = spacecraft_id_to_index_.find(center0.id);
+                        const Spacecraft &center1 =
+                                (center_it != spacecraft_id_to_index_.end() &&
+                                 center_it->second < spacecraft_end.size())
+                                        ? spacecraft_end[center_it->second]
+                                        : center0;
 
                         for (const auto &target: spacecraft_)
                         {
@@ -506,10 +514,51 @@ namespace orbitsim
 
                             const bool active = proximity_active_.contains(target.id);
                             const double threshold = active ? proximity_exit_m : proximity_enter_m;
-                            const std::optional<Event> e = find_earliest_proximity_event_in_interval(
-                                    eph_preview, center0, target, time_s_, remaining, threshold, cfg_.events,
-                                    propagate_sc);
-                            if (e.has_value() && (!best.has_value() || e->t_event_s < best->t_event_s))
+
+                            // Endpoint sign check using cached endpoint propagation.
+                            Spacecraft target1 = target;
+                            {
+                                const auto it = spacecraft_id_to_index_.find(target.id);
+                                if (it != spacecraft_id_to_index_.end() && it->second < spacecraft_end.size())
+                                {
+                                    target1 = spacecraft_end[it->second];
+                                }
+                            }
+                            const double d0 = glm::length(target.state.position_m - center0.state.position_m);
+                            const double d1 = glm::length(target1.state.position_m - center1.state.position_m);
+                            if (!std::isfinite(d0) || !std::isfinite(d1))
+                            {
+                                continue;
+                            }
+                            const double f0 = d0 - threshold;
+                            const double f1 = d1 - threshold;
+                            if (!((f0 <= 0.0 && f1 >= 0.0) || (f0 >= 0.0 && f1 <= 0.0)))
+                            {
+                                continue;
+                            }
+
+                            const Crossing crossing = (f0 > 0.0 && f1 <= 0.0) ? Crossing::Enter : Crossing::Exit;
+                            const double t_event = detail::bisect_crossing_time_s(
+                                    time_s_, time_s_ + remaining, f0, cfg_.events, [&](const double t_s) -> double {
+                                        const Spacecraft cm = propagate_sc(center0, time_s_, t_s - time_s_);
+                                        const Spacecraft tm = propagate_sc(target, time_s_, t_s - time_s_);
+                                        return glm::length(tm.state.position_m - cm.state.position_m) - threshold;
+                                    });
+                            if (!std::isfinite(t_event))
+                            {
+                                continue;
+                            }
+
+                            const Event e = Event{
+                                    .type = EventType::Proximity,
+                                    .body_id = kInvalidBodyId,
+                                    .crossing = crossing,
+                                    .t_event_s = t_event,
+                                    .spacecraft_id = target.id,
+                                    .other_spacecraft_id = center0.id,
+                            };
+
+                            if (!best.has_value() || e.t_event_s < best->t_event_s)
                             {
                                 best = e;
                             }
@@ -522,12 +571,7 @@ namespace orbitsim
                     // No events found: apply preview result for massive bodies to avoid recomputation,
                     // but still need to propagate spacecraft since preview_step_no_events_ skips them.
                     massive_ = std::move(massive_preview);
-
-                    for (std::size_t sc_index = 0; sc_index < spacecraft_.size(); ++sc_index)
-                    {
-                        spacecraft_[sc_index] =
-                                propagate_spacecraft_(spacecraft_[sc_index], eph_preview, time_s_, remaining);
-                    }
+                    spacecraft_ = std::move(spacecraft_end);
 
                     time_s_ = t_preview;
                     return;
@@ -588,11 +632,57 @@ namespace orbitsim
 
         /** @brief Propagate spacecraft through ephemeris segment with maneuvers. */
         inline Spacecraft propagate_spacecraft_(const Spacecraft &sc0, const CelestialEphemerisSegment &eph,
-                                                const double t0_s, const double dt_s) const
+                                                const double t0_s, const double dt_s,
+                                                const std::vector<Spacecraft> &spacecraft_at_t0) const
         {
+            if (dt_s < 0.0)
+            {
+                // Backward propagation is gravity-only in propagate_spacecraft_in_ephemeris, so no LVLH lookup needed.
+                return detail::propagate_spacecraft_in_ephemeris(
+                        sc0, massive_, eph, plan_, cfg_.gravitational_constant, cfg_.softening_length_m,
+                        cfg_.spacecraft_integrator, t0_s, dt_s, nullptr);
+            }
+
+            const double t_end_s = t0_s + dt_s;
+            const double lookup_dt = [&]() -> double {
+                const double max_step = cfg_.spacecraft_integrator.max_step_s;
+                if (max_step > 0.0 && std::isfinite(max_step))
+                {
+                    return max_step;
+                }
+                const double abs_dt = std::abs(dt_s);
+                if (abs_dt > 0.0 && std::isfinite(abs_dt))
+                {
+                    return std::min(abs_dt, 1.0);
+                }
+                return 0.0;
+            }();
+
+            SpacecraftStateCache<CelestialEphemerisSegment> sc_cache(
+                    massive_,
+                    eph,
+                    plan_,
+                    cfg_.gravitational_constant,
+                    cfg_.softening_length_m,
+                    cfg_.spacecraft_integrator,
+                    t0_s,
+                    t_end_s,
+                    [&](const SpacecraftId id) -> const Spacecraft * {
+                        for (const auto &sc: spacecraft_at_t0)
+                        {
+                            if (sc.id == id)
+                            {
+                                return &sc;
+                            }
+                        }
+                        return nullptr;
+                    },
+                    SpacecraftStateCache<CelestialEphemerisSegment>::Options{.lookup_dt_s = lookup_dt});
+            const SpacecraftStateLookup sc_lookup = sc_cache.lookup();
+
             return detail::propagate_spacecraft_in_ephemeris(sc0, massive_, eph, plan_, cfg_.gravitational_constant,
                                                              cfg_.softening_length_m, cfg_.spacecraft_integrator, t0_s,
-                                                             dt_s);
+                                                             dt_s, sc_lookup);
         }
 
         /** @brief Preview step for massive bodies only (for event search). */
@@ -646,9 +736,11 @@ namespace orbitsim
 
             const CelestialEphemerisSegment eph = make_segment_(start_states, end_states, time_s_, dt_s);
 
+            const std::vector<Spacecraft> spacecraft_start = spacecraft_;
             for (std::size_t sc_index = 0; sc_index < spacecraft_.size(); ++sc_index)
             {
-                spacecraft_[sc_index] = propagate_spacecraft_(spacecraft_[sc_index], eph, time_s_, dt_s);
+                spacecraft_[sc_index] =
+                        propagate_spacecraft_(spacecraft_start[sc_index], eph, time_s_, dt_s, spacecraft_start);
             }
 
             time_s_ += dt_s;

@@ -108,6 +108,275 @@ TEST(GameSimulation, TargetedBurnOnlyAffectsOneSpacecraft)
     std::cout << "====== Test completed ======" << std::endl;
 }
 
+TEST(GameSimulation, LVLHImpulseUsesTargetStateAtImpulseTime)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const auto primary_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 1.0,
+            .radius_m = 1.0,
+            .state =
+                    {
+                            .position_m = {0.0, 0.0, 0.0},
+                            .velocity_mps = {0.0, 0.0, 0.0},
+                    },
+    });
+    ASSERT_TRUE(primary_h.valid());
+
+    orbitsim::Spacecraft target{};
+    target.state.position_m = {1.0, 0.0, 0.0};
+    target.state.velocity_mps = {0.0, 1.0, 0.0};
+    target.dry_mass_kg = 1.0;
+    target.prop_mass_kg = 0.0;
+    const auto target_h = sim.create_spacecraft(target);
+    ASSERT_TRUE(target_h.valid());
+
+    orbitsim::Spacecraft chaser{};
+    chaser.state.position_m = {10.0, 0.0, 0.0};
+    chaser.state.velocity_mps = {0.0, 0.0, 0.0};
+    chaser.dry_mass_kg = 1.0;
+    chaser.prop_mass_kg = 0.0;
+    const auto chaser_h = sim.create_spacecraft(chaser);
+    ASSERT_TRUE(chaser_h.valid());
+
+    sim.maneuver_plan().impulses.push_back(
+            orbitsim::impulse()
+                    .time(1.0)
+                    .prograde(10.0)
+                    .primary(primary_h)
+                    .rtn_lvlh(target_h, primary_h)
+                    .spacecraft(chaser_h)
+                    .build());
+
+    sim.step(2.0);
+
+    const orbitsim::Spacecraft *chaser_out = sim.spacecraft_by_id(chaser_h);
+    ASSERT_NE(chaser_out, nullptr);
+
+    // Target at t=1: r=(1,1,0), v=(0,1,0). Prograde (+T) is not aligned with +Y at this time.
+    const orbitsim::Vec3 r_rel{1.0, 1.0, 0.0};
+    const orbitsim::Vec3 v_rel{0.0, 1.0, 0.0};
+    const orbitsim::RtnFrame f = orbitsim::compute_rtn_frame(r_rel, v_rel);
+    const orbitsim::Vec3 expected_dv = 10.0 * f.T;
+
+    EXPECT_TRUE(near_vec_abs(chaser_out->state.velocity_mps, expected_dv, 1e-9));
+    EXPECT_LT(chaser_out->state.velocity_mps.x, -1.0);
+}
+
+TEST(GameSimulation, LVLHImpulseHonorsPrimaryBodyIdInRtnLvlh)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    // Create bodies in an order that makes "auto-select" pick the wrong one when G=0.
+    const auto moon_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 1.0,
+            .radius_m = 1.0,
+            .state =
+                    {
+                            .position_m = {100.0, 0.0, 0.0},
+                            .velocity_mps = {0.0, 0.0, 0.0},
+                    },
+    });
+    ASSERT_TRUE(moon_h.valid());
+
+    const auto earth_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 1.0,
+            .radius_m = 1.0,
+            .state =
+                    {
+                            .position_m = {0.0, 0.0, 0.0},
+                            .velocity_mps = {0.0, 0.0, 0.0},
+                    },
+    });
+    ASSERT_TRUE(earth_h.valid());
+
+    orbitsim::Spacecraft target{};
+    target.state.position_m = {1.0, 0.0, 0.0};
+    target.state.velocity_mps = {0.0, 1.0, 0.0};
+    target.dry_mass_kg = 1.0;
+    target.prop_mass_kg = 0.0;
+    const auto target_h = sim.create_spacecraft(target);
+    ASSERT_TRUE(target_h.valid());
+
+    orbitsim::Spacecraft chaser{};
+    chaser.state.position_m = {10.0, 0.0, 0.0};
+    chaser.state.velocity_mps = {0.0, 0.0, 0.0};
+    chaser.dry_mass_kg = 1.0;
+    chaser.prop_mass_kg = 0.0;
+    const auto chaser_h = sim.create_spacecraft(chaser);
+    ASSERT_TRUE(chaser_h.valid());
+
+    sim.maneuver_plan().impulses.push_back(
+            orbitsim::impulse()
+                    .time(1.0)
+                    .prograde(10.0)
+                    .rtn_lvlh(target_h, earth_h)
+                    .spacecraft(chaser_h)
+                    .build());
+
+    sim.step(2.0);
+
+    const orbitsim::Spacecraft *chaser_out = sim.spacecraft_by_id(chaser_h);
+    ASSERT_NE(chaser_out, nullptr);
+
+    // At t=1: target r=(1,1,0), v=(0,1,0) in inertial. Primary selection must use Earth, not Moon.
+    const orbitsim::Vec3 target_pos{1.0, 1.0, 0.0};
+    const orbitsim::Vec3 target_vel{0.0, 1.0, 0.0};
+
+    const orbitsim::Vec3 r_rel_earth = target_pos - orbitsim::Vec3{0.0, 0.0, 0.0};
+    const orbitsim::Vec3 r_rel_moon = target_pos - orbitsim::Vec3{100.0, 0.0, 0.0};
+    const orbitsim::RtnFrame f_earth = orbitsim::compute_rtn_frame(r_rel_earth, target_vel);
+    const orbitsim::RtnFrame f_moon = orbitsim::compute_rtn_frame(r_rel_moon, target_vel);
+
+    const orbitsim::Vec3 expected_dv = 10.0 * f_earth.T;
+    const orbitsim::Vec3 wrong_dv = 10.0 * f_moon.T;
+
+    EXPECT_TRUE(near_vec_abs(chaser_out->state.velocity_mps, expected_dv, 1e-9));
+    EXPECT_FALSE(near_vec_abs(chaser_out->state.velocity_mps, wrong_dv, 1e-6));
+    EXPECT_LT(chaser_out->state.velocity_mps.x, -1.0);
+}
+
+TEST(GameSimulation, LVLHImpulseHonorsPrimaryBodyIdInTrajectoryFrameSpec)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    // Same setup as the previous test: Moon is created first so auto-select would pick it when G=0.
+    const auto moon_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 1.0,
+            .radius_m = 1.0,
+            .state =
+                    {
+                            .position_m = {100.0, 0.0, 0.0},
+                            .velocity_mps = {0.0, 0.0, 0.0},
+                    },
+    });
+    ASSERT_TRUE(moon_h.valid());
+
+    const auto earth_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 1.0,
+            .radius_m = 1.0,
+            .state =
+                    {
+                            .position_m = {0.0, 0.0, 0.0},
+                            .velocity_mps = {0.0, 0.0, 0.0},
+                    },
+    });
+    ASSERT_TRUE(earth_h.valid());
+
+    orbitsim::Spacecraft target{};
+    target.state.position_m = {1.0, 0.0, 0.0};
+    target.state.velocity_mps = {0.0, 1.0, 0.0};
+    target.dry_mass_kg = 1.0;
+    target.prop_mass_kg = 0.0;
+    const auto target_h = sim.create_spacecraft(target);
+    ASSERT_TRUE(target_h.valid());
+
+    orbitsim::Spacecraft chaser{};
+    chaser.state.position_m = {10.0, 0.0, 0.0};
+    chaser.state.velocity_mps = {0.0, 0.0, 0.0};
+    chaser.dry_mass_kg = 1.0;
+    chaser.prop_mass_kg = 0.0;
+    const auto chaser_h = sim.create_spacecraft(chaser);
+    ASSERT_TRUE(chaser_h.valid());
+
+    sim.maneuver_plan().impulses.push_back(
+            orbitsim::impulse()
+                    .time(1.0)
+                    .prograde(10.0)
+                    .rtn_frame(orbitsim::TrajectoryFrameSpec::lvlh(target_h, earth_h))
+                    .spacecraft(chaser_h)
+                    .build());
+
+    sim.step(2.0);
+
+    const orbitsim::Spacecraft *chaser_out = sim.spacecraft_by_id(chaser_h);
+    ASSERT_NE(chaser_out, nullptr);
+
+    const orbitsim::Vec3 target_pos{1.0, 1.0, 0.0};
+    const orbitsim::Vec3 target_vel{0.0, 1.0, 0.0};
+    const orbitsim::Vec3 r_rel_earth = target_pos - orbitsim::Vec3{0.0, 0.0, 0.0};
+    const orbitsim::RtnFrame f_earth = orbitsim::compute_rtn_frame(r_rel_earth, target_vel);
+    const orbitsim::Vec3 expected_dv = 10.0 * f_earth.T;
+
+    EXPECT_TRUE(near_vec_abs(chaser_out->state.velocity_mps, expected_dv, 1e-9));
+    EXPECT_LT(chaser_out->state.velocity_mps.x, -1.0);
+}
+
+TEST(SpacecraftStateCache, SplitsSegmentsAtImpulses)
+{
+    std::vector<orbitsim::MassiveBody> bodies;
+    bodies.push_back(orbitsim::MassiveBody{
+            .mass_kg = 1.0,
+            .radius_m = 1.0,
+            .state =
+                    {
+                            .position_m = {0.0, 0.0, 0.0},
+                            .velocity_mps = {0.0, 0.0, 0.0},
+                    },
+            .id = 1,
+    });
+
+    orbitsim::CelestialEphemerisSegment eph;
+    eph.t0_s = 0.0;
+    eph.dt_s = 10.0;
+    eph.start = {bodies[0].state};
+    eph.end = {bodies[0].state};
+
+    constexpr orbitsim::SpacecraftId sc_id = 42;
+    orbitsim::Spacecraft sc0{};
+    sc0.id = sc_id;
+    sc0.state.position_m = {1.0, 0.0, 0.0};
+    sc0.state.velocity_mps = {0.0, 0.0, 0.0};
+    sc0.dry_mass_kg = 1.0;
+    sc0.prop_mass_kg = 0.0;
+
+    orbitsim::ManeuverPlan plan;
+    plan.impulses.push_back(orbitsim::impulse().time(5.0).prograde(10.0).primary(bodies[0].id).spacecraft(sc_id).build());
+
+    orbitsim::DOPRI5Options integ{};
+    integ.adaptive = true;
+    integ.max_substeps = 256;
+
+    const orbitsim::SpacecraftStateCache<orbitsim::CelestialEphemerisSegment> cache(
+            bodies,
+            eph,
+            plan,
+            0.0,
+            0.0,
+            integ,
+            0.0,
+            10.0,
+            [&](const orbitsim::SpacecraftId id) -> const orbitsim::Spacecraft * { return (id == sc_id) ? &sc0 : nullptr; },
+            orbitsim::SpacecraftStateCache<orbitsim::CelestialEphemerisSegment>::Options{.lookup_dt_s = 0.0});
+
+    const orbitsim::SpacecraftStateLookup lookup = cache.lookup();
+    const std::optional<orbitsim::State> s_before = lookup(sc_id, 4.0);
+    const std::optional<orbitsim::State> s_after = lookup(sc_id, 6.0);
+    ASSERT_TRUE(s_before.has_value());
+    ASSERT_TRUE(s_after.has_value());
+
+    EXPECT_TRUE(near_vec_abs(s_before->velocity_mps, orbitsim::Vec3{0.0, 0.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(s_after->velocity_mps, orbitsim::Vec3{0.0, 10.0, 0.0}, 1e-9));
+}
+
 TEST(Trajectories, PredictSpacecraftTrajectoryLinearMotion)
 {
     orbitsim::GameSimulation::Config cfg{};

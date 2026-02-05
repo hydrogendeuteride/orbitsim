@@ -2,6 +2,7 @@
 
 #include "orbitsim/frame_spec.hpp"
 #include "orbitsim/ephemeris.hpp"
+#include "orbitsim/spacecraft_lookup.hpp"
 #include "orbitsim/synodic.hpp"
 #include "orbitsim/math.hpp"
 #include "orbitsim/types.hpp"
@@ -9,7 +10,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <limits>
+#include <optional>
 #include <vector>
 
 namespace orbitsim
@@ -181,17 +184,47 @@ namespace orbitsim
         inline Vec3 rtn_vector_to_inertial_in_frame_(const EphemerisLike &eph, const std::vector<MassiveBody> &bodies,
                                                      const std::size_t primary_index, const double t_s,
                                                      const Vec3 &sc_pos_m, const Vec3 &sc_vel_mps, const Vec3 &v_rtn,
-                                                     const TrajectoryFrameSpec &rtn_frame)
+                                                     const TrajectoryFrameSpec &rtn_frame,
+                                                     const SpacecraftStateLookup &sc_lookup = nullptr)
         {
-            const std::optional<RotatingFrame> ref_frame_opt =
-                    make_rtn_reference_frame_at_(eph, bodies, rtn_frame, t_s);
-            if (!ref_frame_opt.has_value())
+            // For LVLH frame, use target spacecraft's state to compute RTN basis
+            Vec3 rtn_basis_pos_m = sc_pos_m;
+            Vec3 rtn_basis_vel_mps = sc_vel_mps;
+
+            if (rtn_frame.type == TrajectoryFrameType::LVLH && sc_lookup)
             {
+                const std::optional<State> target_state = sc_lookup(rtn_frame.target_spacecraft_id, t_s);
+                if (!target_state.has_value())
+                {
+                    return Vec3{0.0, 0.0, 0.0}; // Target spacecraft not found
+                }
+                rtn_basis_pos_m = target_state->position_m;
+                rtn_basis_vel_mps = target_state->velocity_mps;
+            }
+            else if (rtn_frame.type == TrajectoryFrameType::LVLH && !sc_lookup)
+            {
+                // LVLH requested but no lookup provided - cannot proceed
                 return Vec3{0.0, 0.0, 0.0};
+            }
+
+            // For non-LVLH frames, use the reference frame transformation
+            std::optional<RotatingFrame> ref_frame_opt;
+            if (rtn_frame.type != TrajectoryFrameType::LVLH)
+            {
+                ref_frame_opt = make_rtn_reference_frame_at_(eph, bodies, rtn_frame, t_s);
+                if (!ref_frame_opt.has_value())
+                {
+                    return Vec3{0.0, 0.0, 0.0};
+                }
+            }
+            else
+            {
+                // LVLH: use identity frame (inertial), RTN computed from target SC state
+                ref_frame_opt = RotatingFrame{};
             }
             const RotatingFrame &ref_frame = *ref_frame_opt;
 
-            const State sc_f = inertial_state_to_frame(make_state(sc_pos_m, sc_vel_mps), ref_frame);
+            const State sc_f = inertial_state_to_frame(make_state(rtn_basis_pos_m, rtn_basis_vel_mps), ref_frame);
             const State primary_f = inertial_state_to_frame(eph.body_state_at(primary_index, t_s), ref_frame);
 
             const Vec3 r_rel_f = sc_f.position_m - primary_f.position_m;
@@ -206,10 +239,11 @@ namespace orbitsim
         inline Vec3 burn_dir_inertial_unit_in_frame_(const EphemerisLike &eph, const std::vector<MassiveBody> &bodies,
                                                      const std::size_t primary_index, const double t_s,
                                                      const Vec3 &sc_pos_m, const Vec3 &sc_vel_mps,
-                                                     const Vec3 &dir_rtn_unit, const TrajectoryFrameSpec &rtn_frame)
+                                                     const Vec3 &dir_rtn_unit, const TrajectoryFrameSpec &rtn_frame,
+                                                     const SpacecraftStateLookup &sc_lookup = nullptr)
         {
             const Vec3 dir_i = rtn_vector_to_inertial_in_frame_(eph, bodies, primary_index, t_s, sc_pos_m, sc_vel_mps,
-                                                                dir_rtn_unit, rtn_frame);
+                                                                dir_rtn_unit, rtn_frame, sc_lookup);
             return normalized_or(dir_i, Vec3{0.0, 0.0, 0.0});
         }
 
@@ -293,42 +327,50 @@ namespace orbitsim
         }
     } // namespace detail
 
-    /** @brief Convert vector from RTN (computed in a chosen reference frame) to inertial coordinates. */
+    /** @brief Convert vector from RTN (computed in a chosen reference frame) to inertial coordinates.
+     *  @param sc_lookup Optional callback for LVLH frame to look up target spacecraft state.
+     */
     inline Vec3 rtn_vector_to_inertial(const CelestialEphemerisSegment &eph, const std::vector<MassiveBody> &bodies,
                                        const std::size_t primary_index, const double t_s, const Vec3 &sc_pos_m,
                                        const Vec3 &sc_vel_mps, const Vec3 &v_rtn,
-                                       const TrajectoryFrameSpec &rtn_frame = {})
+                                       const TrajectoryFrameSpec &rtn_frame = {},
+                                       const SpacecraftStateLookup &sc_lookup = nullptr)
     {
         return detail::rtn_vector_to_inertial_in_frame_(eph, bodies, primary_index, t_s, sc_pos_m, sc_vel_mps, v_rtn,
-                                                        rtn_frame);
+                                                        rtn_frame, sc_lookup);
     }
 
     inline Vec3 rtn_vector_to_inertial(const CelestialEphemeris &eph, const std::vector<MassiveBody> &bodies,
                                        const std::size_t primary_index, const double t_s, const Vec3 &sc_pos_m,
                                        const Vec3 &sc_vel_mps, const Vec3 &v_rtn,
-                                       const TrajectoryFrameSpec &rtn_frame = {})
+                                       const TrajectoryFrameSpec &rtn_frame = {},
+                                       const SpacecraftStateLookup &sc_lookup = nullptr)
     {
         return detail::rtn_vector_to_inertial_in_frame_(eph, bodies, primary_index, t_s, sc_pos_m, sc_vel_mps, v_rtn,
-                                                        rtn_frame);
+                                                        rtn_frame, sc_lookup);
     }
 
-    /** @brief Convert RTN direction (computed in a chosen reference frame) to normalized inertial direction. */
+    /** @brief Convert RTN direction (computed in a chosen reference frame) to normalized inertial direction.
+     *  @param sc_lookup Optional callback for LVLH frame to look up target spacecraft state.
+     */
     inline Vec3 burn_dir_inertial_unit(const CelestialEphemerisSegment &eph, const std::vector<MassiveBody> &bodies,
                                        const std::size_t primary_index, const double t_s, const Vec3 &sc_pos_m,
                                        const Vec3 &sc_vel_mps, const Vec3 &dir_rtn_unit,
-                                       const TrajectoryFrameSpec &rtn_frame = {})
+                                       const TrajectoryFrameSpec &rtn_frame = {},
+                                       const SpacecraftStateLookup &sc_lookup = nullptr)
     {
         return detail::burn_dir_inertial_unit_in_frame_(eph, bodies, primary_index, t_s, sc_pos_m, sc_vel_mps,
-                                                        dir_rtn_unit, rtn_frame);
+                                                        dir_rtn_unit, rtn_frame, sc_lookup);
     }
 
     inline Vec3 burn_dir_inertial_unit(const CelestialEphemeris &eph, const std::vector<MassiveBody> &bodies,
                                        const std::size_t primary_index, const double t_s, const Vec3 &sc_pos_m,
                                        const Vec3 &sc_vel_mps, const Vec3 &dir_rtn_unit,
-                                       const TrajectoryFrameSpec &rtn_frame = {})
+                                       const TrajectoryFrameSpec &rtn_frame = {},
+                                       const SpacecraftStateLookup &sc_lookup = nullptr)
     {
         return detail::burn_dir_inertial_unit_in_frame_(eph, bodies, primary_index, t_s, sc_pos_m, sc_vel_mps,
-                                                        dir_rtn_unit, rtn_frame);
+                                                        dir_rtn_unit, rtn_frame, sc_lookup);
     }
 
     /** @brief Find next impulse time after t_s, or t_end_s if none. */
@@ -478,6 +520,19 @@ namespace orbitsim
             return *this;
         }
 
+        /// @brief Compute RTN basis in LVLH frame of a target spacecraft.
+        /// @param target_sc_id Target spacecraft whose LVLH frame is used.
+        /// @param primary_body_id Primary body for RTN computation (default: auto-select).
+        BurnBuilder &rtn_lvlh(const SpacecraftId target_sc_id, const BodyId primary_body_id = kInvalidBodyId)
+        {
+            seg_.rtn_frame = TrajectoryFrameSpec::lvlh(target_sc_id, primary_body_id);
+            if (primary_body_id != kInvalidBodyId)
+            {
+                seg_.primary_body_id = primary_body_id;
+            }
+            return *this;
+        }
+
         /// @brief Set the target spacecraft.
         BurnBuilder &spacecraft(const SpacecraftId spacecraft_id)
         {
@@ -531,6 +586,13 @@ namespace orbitsim
             return *this;
         }
 
+        /// @brief Set delta-v direction (unit vector in RTN) and magnitude [m/s].
+        ImpulseBuilder &direction(const Vec3 &dir_rtn_unit, const double magnitude_mps)
+        {
+            seg_.dv_rtn_mps = normalized_or(dir_rtn_unit, Vec3{0.0, 1.0, 0.0}) * magnitude_mps;
+            return *this;
+        }
+
         /// @brief Set the primary body for RTN frame computation.
         ImpulseBuilder &primary(const BodyId primary_body_id)
         {
@@ -570,6 +632,19 @@ namespace orbitsim
         ImpulseBuilder &rtn_synodic(const BodyId body_a_id, const BodyId body_b_id)
         {
             seg_.rtn_frame = TrajectoryFrameSpec::synodic(body_a_id, body_b_id);
+            return *this;
+        }
+
+        /// @brief Compute RTN basis in LVLH frame of a target spacecraft.
+        /// @param target_sc_id Target spacecraft whose LVLH frame is used.
+        /// @param primary_body_id Primary body for RTN computation (default: auto-select).
+        ImpulseBuilder &rtn_lvlh(const SpacecraftId target_sc_id, const BodyId primary_body_id = kInvalidBodyId)
+        {
+            seg_.rtn_frame = TrajectoryFrameSpec::lvlh(target_sc_id, primary_body_id);
+            if (primary_body_id != kInvalidBodyId)
+            {
+                seg_.primary_body_id = primary_body_id;
+            }
             return *this;
         }
 
