@@ -1,5 +1,6 @@
 #pragma once
 
+#include "orbitsim/frame_utils.hpp"
 #include "orbitsim/types.hpp"
 
 #include <algorithm>
@@ -79,62 +80,6 @@ namespace orbitsim
 
         const Vec3 dp_dtau = (h00p * p0) + (h10p * (h * v0_mps)) + (h01p * p1) + (h11p * (h * v1_mps));
         return dp_dtau / h;
-    }
-
-    /** @brief Radial-Tangential-Normal frame basis vectors. */
-    struct RtnFrame
-    {
-        Vec3 R{1.0, 0.0, 0.0}; ///< Radial (away from primary)
-        Vec3 T{0.0, 1.0, 0.0}; ///< Tangential (in orbital plane, roughly velocity direction)
-        Vec3 N{0.0, 0.0, 1.0}; ///< Normal (angular momentum direction)
-    };
-
-    /**
-     * @brief Compute RTN frame from relative position and velocity.
-     *
-     * R = r_hat, N = h_hat (angular momentum), T = N x R.
-     * Handles degenerate cases (rectilinear, zero velocity) gracefully.
-     */
-    inline RtnFrame compute_rtn_frame(const Vec3 &r_rel_m, const Vec3 &v_rel_mps)
-    {
-        RtnFrame f;
-        f.R = normalized_or(r_rel_m, Vec3{1.0, 0.0, 0.0});
-
-        const Vec3 h = glm::cross(r_rel_m, v_rel_mps);
-        const double h2 = glm::dot(h, h);
-        if (h2 > 1e-24 && std::isfinite(h2))
-        {
-            f.N = h / std::sqrt(h2);
-            f.T = normalized_or(glm::cross(f.N, f.R), Vec3{0.0, 1.0, 0.0});
-            return f;
-        }
-
-        Vec3 vhat = normalized_or(v_rel_mps, Vec3{0.0, 1.0, 0.0});
-        Vec3 t = vhat - glm::dot(vhat, f.R) * f.R;
-        if (glm::dot(t, t) <= 1e-24 || !std::isfinite(glm::dot(t, t)))
-        {
-            const Vec3 axis = (std::abs(f.R.x) < 0.9) ? Vec3{1.0, 0.0, 0.0} : Vec3{0.0, 1.0, 0.0};
-            t = glm::cross(f.R, axis);
-        }
-        f.T = normalized_or(t, Vec3{0.0, 1.0, 0.0});
-        f.N = normalized_or(glm::cross(f.R, f.T), Vec3{0.0, 0.0, 1.0});
-        f.T = normalized_or(glm::cross(f.N, f.R), f.T);
-        return f;
-    }
-
-    inline double wrap_angle_0_2pi(const double rad)
-    {
-        if (!std::isfinite(rad))
-        {
-            return 0.0;
-        }
-        const double two_pi = 2.0 * std::acos(-1.0);
-        double x = std::fmod(rad, two_pi);
-        if (x < 0.0)
-        {
-            x += two_pi;
-        }
-        return x;
     }
 
     struct OrbitalElements
@@ -695,55 +640,6 @@ namespace orbitsim
         }
         const double sz = std::sqrt(-z);
         return (std::sinh(sz) - sz) / (sz * sz * sz);
-    }
-
-    /**
-     * @brief Select the body index with highest gravitational acceleration at query_pos_m.
-     *
-     * Ranks bodies by mass_kg / r^2 (G is a constant positive multiplier and does not affect ranking).
-     *
-     * @tparam BodyPositionAt Callable: (std::size_t index) -> Vec3 returning body position.
-     * @param bodies Massive bodies to consider
-     * @param query_pos_m Query position (e.g. spacecraft position)
-     * @param body_position_at Functor returning the position of body at given index
-     * @param softening_length_m Optional softening length added in quadrature to distance
-     * @return Index of the body with the strongest gravitational pull at query_pos_m
-     */
-    template<class BodyPositionAt>
-    inline std::size_t auto_select_primary_index(const std::vector<MassiveBody> &bodies, const Vec3 &query_pos_m,
-                                                  BodyPositionAt body_position_at,
-                                                  const double softening_length_m = 0.0)
-    {
-        if (bodies.empty())
-        {
-            return 0;
-        }
-
-        const double eps2 = softening_length_m * softening_length_m;
-        std::size_t best = 0;
-        double best_metric = -1.0;
-        for (std::size_t i = 0; i < bodies.size(); ++i)
-        {
-            const double mass_kg = std::isfinite(bodies[i].mass_kg) ? bodies[i].mass_kg : 0.0;
-            if (!(mass_kg >= 0.0))
-            {
-                continue;
-            }
-
-            const Vec3 dr = body_position_at(i) - query_pos_m;
-            const double r2 = glm::dot(dr, dr) + eps2;
-            if (!(r2 > 0.0) || !std::isfinite(r2))
-            {
-                continue;
-            }
-            const double metric = mass_kg / r2;
-            if (metric > best_metric)
-            {
-                best_metric = metric;
-                best = i;
-            }
-        }
-        return best;
     }
 
 } // namespace orbitsim

@@ -253,10 +253,10 @@ burn.throttle_0_1 = 1.0;
 burn.engine_index = 0;
 burn.spacecraft_id = ship_id;  // or kAllSpacecraft
 
-// Method 2: Factory functions
-auto burn2 = prograde_burn(hours(2.0), minutes(3.0), ship_id);
-auto burn3 = retrograde_burn(hours(3.0), minutes(2.0));
-auto burn4 = normal_burn(hours(4.0), minutes(1.0));
+// Method 2: Builder shorthand for common directions
+auto burn2 = burn().start(hours(2.0)).duration(minutes(3.0)).prograde().spacecraft(ship_id).build();
+auto burn3 = burn().start(hours(3.0)).duration(minutes(2.0)).retrograde().build();
+auto burn4 = burn().start(hours(4.0)).duration(minutes(1.0)).normal().build();
 
 // Method 3: Builder pattern
 auto burn5 = burn()
@@ -324,8 +324,12 @@ auto imp5 = impulse()
 ManeuverPlan& plan = sim.maneuver_plan();
 
 // Add burn segments
-plan.segments.push_back(prograde_burn(hours(1.0), minutes(5.0)));
-plan.segments.push_back(retrograde_burn(hours(3.0), minutes(2.0)));
+plan.segments.push_back(
+    burn().start(hours(1.0)).duration(minutes(5.0)).prograde().build()
+);
+plan.segments.push_back(
+    burn().start(hours(3.0)).duration(minutes(2.0)).retrograde().build()
+);
 
 // Add impulses
 plan.impulses.push_back(
@@ -881,7 +885,7 @@ int main() {
 
     // Add prograde burn
     sim.maneuver_plan().segments.push_back(
-        prograde_burn(minutes(30.0), minutes(2.0), ship_id)
+        burn().start(minutes(30.0)).duration(minutes(2.0)).prograde().spacecraft(ship_id).build()
     );
 
     // Predict trajectory

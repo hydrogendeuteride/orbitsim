@@ -1,6 +1,7 @@
 #pragma once
 
 #include "orbitsim/ephemeris.hpp"
+#include "orbitsim/frame_utils.hpp"
 #include "orbitsim/math.hpp"
 #include "orbitsim/types.hpp"
 
@@ -9,6 +10,47 @@
 
 namespace orbitsim
 {
+
+    /** @brief Radial-Tangential-Normal frame basis vectors. */
+    struct RtnFrame
+    {
+        Vec3 R{1.0, 0.0, 0.0}; ///< Radial (away from primary)
+        Vec3 T{0.0, 1.0, 0.0}; ///< Tangential (in orbital plane, roughly velocity direction)
+        Vec3 N{0.0, 0.0, 1.0}; ///< Normal (angular momentum direction)
+    };
+
+    /**
+     * @brief Compute RTN frame from relative position and velocity.
+     *
+     * R = r_hat, N = h_hat (angular momentum), T = N x R.
+     * Handles degenerate cases (rectilinear, zero velocity) gracefully.
+     */
+    inline RtnFrame compute_rtn_frame(const Vec3 &r_rel_m, const Vec3 &v_rel_mps)
+    {
+        RtnFrame f;
+        f.R = normalized_or(r_rel_m, Vec3{1.0, 0.0, 0.0});
+
+        const Vec3 h = glm::cross(r_rel_m, v_rel_mps);
+        const double h2 = glm::dot(h, h);
+        if (h2 > 1e-24 && std::isfinite(h2))
+        {
+            f.N = h / std::sqrt(h2);
+            f.T = normalized_or(glm::cross(f.N, f.R), Vec3{0.0, 1.0, 0.0});
+            return f;
+        }
+
+        Vec3 vhat = normalized_or(v_rel_mps, Vec3{0.0, 1.0, 0.0});
+        Vec3 t = vhat - glm::dot(vhat, f.R) * f.R;
+        if (glm::dot(t, t) <= 1e-24 || !std::isfinite(glm::dot(t, t)))
+        {
+            const Vec3 axis = (std::abs(f.R.x) < 0.9) ? Vec3{1.0, 0.0, 0.0} : Vec3{0.0, 1.0, 0.0};
+            t = glm::cross(f.R, axis);
+        }
+        f.T = normalized_or(t, Vec3{0.0, 1.0, 0.0});
+        f.N = normalized_or(glm::cross(f.R, f.T), Vec3{0.0, 0.0, 1.0});
+        f.T = normalized_or(glm::cross(f.N, f.R), f.T);
+        return f;
+    }
 
     /**
      * @brief Rigid translating + rotating coordinate frame relative to the library inertial frame.

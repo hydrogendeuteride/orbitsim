@@ -1,5 +1,6 @@
 #pragma once
 
+#include "orbitsim/coordinate_frames.hpp"
 #include "orbitsim/ephemeris.hpp"
 #include "orbitsim/maneuvers_builders.hpp"
 #include "orbitsim/math.hpp"
