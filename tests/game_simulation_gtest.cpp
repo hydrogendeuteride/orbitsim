@@ -296,8 +296,7 @@ TEST(GameSimulation, StepReturnsImpactEvent)
     ASSERT_TRUE(sc_h.valid());
 
     std::vector<orbitsim::Event> events;
-    // Use a step that brackets the boundary crossing (outside -> inside) so endpoint-based
-    // event detection can find the root via bisection.
+    // Crossing should be refined near t=1.
     sim.step(2.0, &events);
 
     ASSERT_FALSE(events.empty());
@@ -372,3 +371,227 @@ TEST(GameSimulation, ProximityEnterExitWithHysteresis)
     EXPECT_TRUE(near_abs(prox[1].t_event_s, 6400.0, 1e-2));
 }
 
+TEST(GameSimulation, StepDetectsIntraStepImpactEnterAndExit)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = true;
+    cfg.events.time_tol_s = 1e-6;
+    cfg.events.dist_tol_m = 1e-6;
+    cfg.events.crossing_scan_substeps = 32;
+    cfg.events.max_event_splits_per_step = 16;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const auto body_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 0.0,
+            .radius_m = 1.0,
+            .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+    });
+    ASSERT_TRUE(body_h.valid());
+
+    const auto sc_h = sim.create_spacecraft(orbitsim::Spacecraft{
+            .state = orbitsim::make_state({-2.0, 0.5, 0.0}, {4.0, 0.0, 0.0}),
+            .dry_mass_kg = 1.0,
+            .prop_mass_kg = 0.0,
+    });
+    ASSERT_TRUE(sc_h.valid());
+
+    std::vector<orbitsim::Event> events;
+    sim.step(1.0, &events);
+
+    std::vector<orbitsim::Event> impacts;
+    for (const auto &e : events)
+    {
+        if (e.type == orbitsim::EventType::Impact && e.body_id == body_h.id && e.spacecraft_id == sc_h.id)
+        {
+            impacts.push_back(e);
+        }
+    }
+
+    ASSERT_GE(impacts.size(), 2u);
+    EXPECT_EQ(impacts[0].crossing, orbitsim::Crossing::Enter);
+    EXPECT_EQ(impacts[1].crossing, orbitsim::Crossing::Exit);
+    EXPECT_TRUE(near_abs(impacts[0].t_event_s, 0.2834936, 5e-3));
+    EXPECT_TRUE(near_abs(impacts[1].t_event_s, 0.7165064, 5e-3));
+}
+
+TEST(GameSimulation, StepDetectsIntraStepProximityEnterAndExit)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = true;
+    cfg.events.time_tol_s = 1e-6;
+    cfg.events.dist_tol_m = 1e-6;
+    cfg.events.crossing_scan_substeps = 32;
+    cfg.events.max_event_splits_per_step = 16;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    constexpr orbitsim::SpacecraftId center_id = 9001u;
+    constexpr orbitsim::SpacecraftId target_id = 9002u;
+    cfg.proximity.enable = true;
+    cfg.proximity.center_spacecraft_id = center_id;
+    cfg.proximity.enter_radius_m = 1.0;
+    cfg.proximity.exit_radius_m = 1.0;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    ASSERT_TRUE(sim.create_spacecraft_with_id(center_id, orbitsim::Spacecraft{
+                                                              .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+                                                              .dry_mass_kg = 1.0,
+                                                              .prop_mass_kg = 0.0,
+                                                      }).valid());
+
+    ASSERT_TRUE(sim.create_spacecraft_with_id(target_id, orbitsim::Spacecraft{
+                                                              .state = orbitsim::make_state({-2.0, 0.5, 0.0}, {4.0, 0.0, 0.0}),
+                                                              .dry_mass_kg = 1.0,
+                                                              .prop_mass_kg = 0.0,
+                                                      }).valid());
+
+    std::vector<orbitsim::Event> events;
+    sim.step(1.0, &events);
+
+    std::vector<orbitsim::Event> prox;
+    for (const auto &e : events)
+    {
+        if (e.type == orbitsim::EventType::Proximity && e.spacecraft_id == target_id && e.other_spacecraft_id == center_id)
+        {
+            prox.push_back(e);
+        }
+    }
+
+    ASSERT_GE(prox.size(), 2u);
+    EXPECT_EQ(prox[0].crossing, orbitsim::Crossing::Enter);
+    EXPECT_EQ(prox[1].crossing, orbitsim::Crossing::Exit);
+    EXPECT_TRUE(near_abs(prox[0].t_event_s, 0.2834936, 5e-3));
+    EXPECT_TRUE(near_abs(prox[1].t_event_s, 0.7165064, 5e-3));
+}
+
+TEST(GameSimulation, ZeroTimeToleranceStillAdvancesPastEvent)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = true;
+    cfg.events.time_tol_s = 0.0;
+    cfg.events.dist_tol_m = 1e-6;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+    ASSERT_TRUE(sim.create_body(orbitsim::MassiveBody{
+                                        .mass_kg = 0.0,
+                                        .radius_m = 1.0,
+                                        .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+                                }).valid());
+    ASSERT_TRUE(sim.create_spacecraft(orbitsim::Spacecraft{
+                                              .state = orbitsim::make_state({2.0, 0.0, 0.0}, {-1.0, 0.0, 0.0}),
+                                              .dry_mass_kg = 1.0,
+                                              .prop_mass_kg = 0.0,
+                                      }).valid());
+
+    std::vector<orbitsim::Event> events;
+    sim.step(2.0, &events);
+
+    EXPECT_TRUE(near_abs(sim.time_s(), 2.0, 1e-12));
+    ASSERT_FALSE(events.empty());
+}
+
+TEST(GameSimulation, BackwardStepRewindsBurnAndPropellant)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const auto body_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 0.0,
+            .radius_m = 1.0,
+            .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+    });
+    ASSERT_TRUE(body_h.valid());
+
+    orbitsim::Spacecraft sc{};
+    sc.state = orbitsim::make_state({1.0, 0.0, 0.0}, {0.0, 0.0, 0.0});
+    sc.dry_mass_kg = 1.0;
+    sc.prop_mass_kg = 0.2;
+    sc.engines.push_back(orbitsim::Engine{.max_thrust_N = 10.0, .isp_s = 100.0, .min_throttle_0_1 = 0.0});
+    const auto sc_h = sim.create_spacecraft(sc);
+    ASSERT_TRUE(sc_h.valid());
+
+    sim.maneuver_plan().segments.push_back(
+        orbitsim::burn()
+            .start(0.0)
+            .duration(1.0)
+            .radial_out()
+            .primary(body_h)
+            .engine(0)
+            .spacecraft(sc_h)
+            .build());
+
+    sim.step(2.0);
+    const orbitsim::Spacecraft *after_forward = sim.spacecraft_by_id(sc_h);
+    ASSERT_NE(after_forward, nullptr);
+    ASSERT_LT(after_forward->prop_mass_kg, 0.2);
+    ASSERT_GT(after_forward->state.velocity_mps.x, 0.0);
+
+    sim.step(-2.0);
+    const orbitsim::Spacecraft *after_backward = sim.spacecraft_by_id(sc_h);
+    ASSERT_NE(after_backward, nullptr);
+
+    EXPECT_TRUE(near_abs(sim.time_s(), 0.0, 1e-9));
+    EXPECT_TRUE(near_abs(after_backward->prop_mass_kg, 0.2, 1e-4));
+    EXPECT_TRUE(near_vec_abs(after_backward->state.position_m, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-4));
+    EXPECT_TRUE(near_vec_abs(after_backward->state.velocity_mps, orbitsim::Vec3{0.0, 0.0, 0.0}, 1e-4));
+}
+
+TEST(GameSimulation, BackwardStepReturnsReversedBoundaryCrossing)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = true;
+    cfg.events.time_tol_s = 1e-6;
+    cfg.events.dist_tol_m = 1e-6;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const auto body_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 0.0,
+            .radius_m = 1.0,
+            .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+    });
+    ASSERT_TRUE(body_h.valid());
+
+    const auto sc_h = sim.create_spacecraft(orbitsim::Spacecraft{
+            .state = orbitsim::make_state({2.0, 0.0, 0.0}, {-1.0, 0.0, 0.0}),
+            .dry_mass_kg = 1.0,
+            .prop_mass_kg = 0.0,
+    });
+    ASSERT_TRUE(sc_h.valid());
+
+    std::vector<orbitsim::Event> forward_events;
+    sim.step(2.0, &forward_events);
+    ASSERT_FALSE(forward_events.empty());
+    EXPECT_EQ(forward_events.front().crossing, orbitsim::Crossing::Enter);
+
+    std::vector<orbitsim::Event> backward_events;
+    sim.step(-2.0, &backward_events);
+    ASSERT_FALSE(backward_events.empty());
+    EXPECT_EQ(backward_events.front().type, orbitsim::EventType::Impact);
+    EXPECT_EQ(backward_events.front().body_id, body_h.id);
+    EXPECT_EQ(backward_events.front().crossing, orbitsim::Crossing::Exit);
+    EXPECT_TRUE(near_abs(backward_events.front().t_event_s, 1.0, 1e-3));
+
+    const orbitsim::Spacecraft *sc_back = sim.spacecraft_by_id(sc_h);
+    ASSERT_NE(sc_back, nullptr);
+    EXPECT_TRUE(near_abs(sim.time_s(), 0.0, 1e-9));
+    EXPECT_TRUE(near_vec_abs(sc_back->state.position_m, orbitsim::Vec3{2.0, 0.0, 0.0}, 1e-6));
+    EXPECT_TRUE(near_vec_abs(sc_back->state.velocity_mps, orbitsim::Vec3{-1.0, 0.0, 0.0}, 1e-6));
+}

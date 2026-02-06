@@ -172,6 +172,32 @@ namespace orbitsim
             }
             return bound;
         }
+
+        template<class Pred>
+        inline double previous_burn_boundary_before_if_(const ManeuverPlan &plan, const double t_s,
+                                                        const double t_end_s, Pred pred)
+        {
+            double bound = t_end_s;
+            for (const auto &seg: plan.segments)
+            {
+                if (!pred(seg))
+                {
+                    continue;
+                }
+
+                if (seg.t_end_s < t_s && seg.t_end_s > bound)
+                {
+                    bound = seg.t_end_s;
+                }
+
+                const bool seg_active_before = (seg.t_start_s < t_s && t_s <= seg.t_end_s);
+                if (seg_active_before && seg.t_start_s < t_s && seg.t_start_s > bound)
+                {
+                    bound = seg.t_start_s;
+                }
+            }
+            return bound;
+        }
     } // namespace detail
 
     /** @brief Find active burn segment at time t_s for a spacecraft, or nullptr if none. */
@@ -191,6 +217,15 @@ namespace orbitsim
         });
     }
 
+    /** @brief Find previous burn start/end time before t_s, or t_end_s if none. */
+    inline double previous_burn_boundary_before(const ManeuverPlan &plan, const SpacecraftId spacecraft_id,
+                                                const double t_s, const double t_end_s)
+    {
+        return detail::previous_burn_boundary_before_if_(plan, t_s, t_end_s, [&](const BurnSegment &seg) {
+            return segment_applies_to_spacecraft(seg, spacecraft_id);
+        });
+    }
+
     namespace detail
     {
         template<class Pred>
@@ -205,6 +240,25 @@ namespace orbitsim
                     continue;
                 }
                 if (seg.t_s > t_s && seg.t_s < bound)
+                {
+                    bound = seg.t_s;
+                }
+            }
+            return bound;
+        }
+
+        template<class Pred>
+        inline double previous_impulse_time_before_if_(const ManeuverPlan &plan, const double t_s, const double t_end_s,
+                                                       Pred pred)
+        {
+            double bound = t_end_s;
+            for (const auto &seg: plan.impulses)
+            {
+                if (!pred(seg))
+                {
+                    continue;
+                }
+                if (seg.t_s < t_s && seg.t_s > bound)
                 {
                     bound = seg.t_s;
                 }
@@ -264,6 +318,15 @@ namespace orbitsim
                                           const double t_end_s)
     {
         return detail::next_impulse_time_after_if_(plan, t_s, t_end_s, [&](const ImpulseSegment &seg) {
+            return segment_applies_to_spacecraft(seg, spacecraft_id);
+        });
+    }
+
+    /** @brief Find previous impulse time before t_s, or t_end_s if none. */
+    inline double previous_impulse_time_before(const ManeuverPlan &plan, const SpacecraftId spacecraft_id,
+                                               const double t_s, const double t_end_s)
+    {
+        return detail::previous_impulse_time_before_if_(plan, t_s, t_end_s, [&](const ImpulseSegment &seg) {
             return segment_applies_to_spacecraft(seg, spacecraft_id);
         });
     }

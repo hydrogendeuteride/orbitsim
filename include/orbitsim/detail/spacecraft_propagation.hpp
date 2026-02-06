@@ -118,8 +118,8 @@ namespace orbitsim::detail
      * - Thrust from active burns in the maneuver plan (in RTN frame)
      * - Instantaneous impulse maneuvers at scheduled times
      *
-     * Automatically subdivides at burn boundaries and handles propellant depletion.
-     * Backward integration (dt_s < 0) is gravity-only (no maneuvers).
+     * Automatically subdivides at burn/impulse boundaries and handles propellant updates.
+     * Backward integration (dt_s < 0) applies inverse impulses and rewinds burns.
      *
      * @tparam EphemerisLike Type providing body_position_at(index, t_s)
      * @param sc0 Initial spacecraft state
@@ -147,23 +147,8 @@ namespace orbitsim::detail
             return out;
         }
 
-        if (dt_s < 0.0)
-        {
-            // Backwards integration currently supports gravity-only (no maneuvers, no prop changes).
-            const SpacecraftKinematics y0{out.state.position_m, out.state.velocity_mps};
-            auto accel = [&](double t_eval_s, const Vec3 &pos_m, const Vec3 & /*vel_mps*/) -> Vec3 {
-                return gravity_accel_mps2(eph, bodies, gravitational_constant, softening_length_m, t_eval_s, pos_m);
-            };
-            const SpacecraftKinematics y1 =
-                    dopri5_integrate_interval(t0_s, y0, dt_s, accel, spacecraft_integrator);
-
-            out.state.position_m = y1.position_m;
-            out.state.velocity_mps = y1.velocity_mps;
-            advance_spin(out.state.spin, dt_s);
-            return out;
-        }
-
         const double t_end_s = t0_s + dt_s;
+        const bool forward = (dt_s > 0.0);
         double t = t0_s;
         double remaining = dt_s;
 
@@ -179,7 +164,8 @@ namespace orbitsim::detail
             return resolve_primary_index(bodies, seg, t_s, pos_m, sc_lookup, auto_primary_at);
         };
 
-        auto apply_impulses_at = [&](const double t_s, const Vec3 &pos_m, const Vec3 &vel_mps) -> Vec3 {
+        auto apply_impulses_at = [&](const double t_s, const Vec3 &pos_m, const Vec3 &vel_mps,
+                                     const double scale) -> Vec3 {
             Vec3 dv_i{0.0, 0.0, 0.0};
             if (plan.impulses.empty())
             {
@@ -204,45 +190,60 @@ namespace orbitsim::detail
                     continue;
                 }
                 const std::size_t primary = resolve_primary(imp, t_s, pos_m);
-                dv_i += rtn_vector_to_inertial(eph, bodies, primary, t_s, pos_m, vel_mps, imp.dv_rtn_mps, imp.rtn_frame, sc_lookup);
+                dv_i += scale * rtn_vector_to_inertial(
+                                        eph, bodies, primary, t_s, pos_m, vel_mps, imp.dv_rtn_mps, imp.rtn_frame,
+                                        sc_lookup);
             }
             return dv_i;
         };
 
-        while (remaining > 0.0)
+        auto has_remaining = [&]() -> bool {
+            return forward ? (remaining > 0.0) : (remaining < 0.0);
+        };
+
+        while (has_remaining())
         {
             // Apply any instantaneous impulses at the current time.
             {
-                const Vec3 dv_i = apply_impulses_at(t, y.position_m, y.velocity_mps);
+                const double impulse_scale = forward ? 1.0 : -1.0;
+                const Vec3 dv_i = apply_impulses_at(t, y.position_m, y.velocity_mps, impulse_scale);
                 if (glm::dot(dv_i, dv_i) > 0.0 && std::isfinite(dv_i.x) && std::isfinite(dv_i.y) && std::isfinite(dv_i.z))
                 {
                     y.velocity_mps += dv_i;
                 }
             }
 
-            const double burn_boundary = next_burn_boundary_after(plan, spacecraft_id, t, t_end_s);
-            const double impulse_boundary = next_impulse_time_after(plan, spacecraft_id, t, t_end_s);
-            const double boundary = std::min(burn_boundary, impulse_boundary);
+            const double burn_boundary =
+                    forward ? next_burn_boundary_after(plan, spacecraft_id, t, t_end_s)
+                            : previous_burn_boundary_before(plan, spacecraft_id, t, t_end_s);
+            const double impulse_boundary =
+                    forward ? next_impulse_time_after(plan, spacecraft_id, t, t_end_s)
+                            : previous_impulse_time_before(plan, spacecraft_id, t, t_end_s);
+            const double boundary = forward ? std::min(burn_boundary, impulse_boundary)
+                                            : std::max(burn_boundary, impulse_boundary);
 
-            double h = std::min(remaining, boundary - t);
-            if (!(h > 0.0) || !std::isfinite(h))
+            double h = forward ? std::min(remaining, boundary - t) : std::max(remaining, boundary - t);
+            if (!std::isfinite(h) || !(forward ? (h > 0.0) : (h < 0.0)))
             {
                 break;
             }
 
-            const BurnSegment *seg = active_burn_at(plan, spacecraft_id, t);
+            const double t_active = forward ? t : std::nextafter(t, t_end_s);
+            const BurnSegment *seg = active_burn_at(plan, spacecraft_id, t_active);
             const bool has_engine = (seg != nullptr) && (seg->engine_index < out.engines.size());
             const Engine engine = has_engine ? out.engines[seg->engine_index] : Engine{};
 
             const double throttle = (seg != nullptr) ? clamp01(seg->throttle_0_1) : 0.0;
             const double min_thr = std::max(0.0, engine.min_throttle_0_1);
-            const bool thrust_on = has_engine && (engine.max_thrust_N > 0.0) && (engine.isp_s > 0.0) &&
-                                   (throttle >= min_thr) && (out.prop_mass_kg > 0.0) && !bodies.empty();
+            const bool thrust_model_valid =
+                    has_engine && (engine.max_thrust_N > 0.0) && (engine.isp_s > 0.0) && (throttle >= min_thr) &&
+                    !bodies.empty();
+            const bool thrust_on = thrust_model_valid && (forward ? (out.prop_mass_kg > 0.0) : true);
 
             const double thrust_N = thrust_on ? (engine.max_thrust_N * throttle) : 0.0;
             const double mdot_kgps = thrust_on ? (thrust_N / (engine.isp_s * kStandardGravity_mps2)) : 0.0;
 
-            if (mdot_kgps > 0.0 && out.prop_mass_kg > 0.0)
+            if (forward && mdot_kgps > 0.0 && out.prop_mass_kg > 0.0)
             {
                 const double h_burn = out.prop_mass_kg / mdot_kgps;
                 if (h_burn > 0.0 && h_burn < h)

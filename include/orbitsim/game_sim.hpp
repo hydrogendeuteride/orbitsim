@@ -376,7 +376,7 @@ namespace orbitsim
          * at event boundaries (SOI crossings, impacts, periapsis, etc.).
          * Detected events are appended to out_events if provided.
          *
-         * @param dt_s Time to advance (positive = forward, negative = backward without events)
+         * @param dt_s Time to advance (positive = forward, negative = backward)
          * @param out_events Optional output vector for detected events
          */
         void step(const double dt_s, std::vector<Event> *out_events)
@@ -390,10 +390,39 @@ namespace orbitsim
                 return;
             }
 
-            if (dt_s < 0.0 || !cfg_.enable_events || cfg_.events.max_event_splits_per_step <= 0)
+            if (!cfg_.enable_events || cfg_.events.max_event_splits_per_step <= 0)
             {
-                // Backwards integration with event splitting is not supported.
                 step_no_events_(dt_s);
+                if (dt_s < 0.0)
+                {
+                    reset_proximity_tracking_();
+                }
+                return;
+            }
+
+            if (dt_s < 0.0)
+            {
+                // Rewind state first, then replay forward in a temporary copy to recover
+                // backwards-visible events with inverted crossing directions.
+                GameSimulation rewound = *this;
+                rewound.step_no_events_(dt_s);
+
+                if (out_events != nullptr)
+                {
+                    std::vector<Event> forward_events;
+                    GameSimulation replay = rewound;
+                    replay.step(-dt_s, &forward_events);
+                    out_events->reserve(forward_events.size());
+                    for (auto it = forward_events.rbegin(); it != forward_events.rend(); ++it)
+                    {
+                        Event e = *it;
+                        e.crossing = invert_crossing_(e.crossing);
+                        out_events->push_back(e);
+                    }
+                }
+
+                *this = std::move(rewound);
+                reset_proximity_tracking_();
                 return;
             }
 
@@ -468,6 +497,17 @@ namespace orbitsim
         {
             detail::step_no_events(massive_, spacecraft_, time_s_, dt_s, plan_, cfg_.gravitational_constant,
                                    cfg_.softening_length_m, cfg_.spacecraft_integrator);
+        }
+
+        static Crossing invert_crossing_(const Crossing c)
+        {
+            return (c == Crossing::Enter) ? Crossing::Exit : Crossing::Enter;
+        }
+
+        void reset_proximity_tracking_()
+        {
+            proximity_initialized_ = false;
+            proximity_active_.clear();
         }
 
         detail::ProximityConfig resolve_proximity_config_() const
@@ -552,11 +592,6 @@ namespace orbitsim
             }
 
             const Spacecraft center0 = *center_ptr;
-            const auto center_it = spacecraft_id_to_index_.find(center0.id);
-            const Spacecraft &center1 =
-                    (center_it != spacecraft_id_to_index_.end() && center_it->second < out.spacecraft_end.size())
-                            ? out.spacecraft_end[center_it->second]
-                            : center0;
 
             // Proximity events: one center spacecraft vs all targets.
             for (const auto &target : spacecraft_)
@@ -568,28 +603,6 @@ namespace orbitsim
 
                 const bool active = proximity_active_.contains(target.id);
                 const double threshold = active ? prox.exit_radius_m : prox.enter_radius_m;
-
-                // Endpoint pre-check: skip full bisection when no sign change is possible.
-                Spacecraft target1 = target;
-                const auto it = spacecraft_id_to_index_.find(target.id);
-                if (it != spacecraft_id_to_index_.end() && it->second < out.spacecraft_end.size())
-                {
-                    target1 = out.spacecraft_end[it->second];
-                }
-
-                const double d0 = glm::length(target.state.position_m - center0.state.position_m);
-                const double d1 = glm::length(target1.state.position_m - center1.state.position_m);
-                if (!std::isfinite(d0) || !std::isfinite(d1))
-                {
-                    continue;
-                }
-
-                const double f0 = d0 - threshold;
-                const double f1 = d1 - threshold;
-                if (!((f0 <= 0.0 && f1 >= 0.0) || (f0 >= 0.0 && f1 <= 0.0)))
-                {
-                    continue;
-                }
 
                 const std::optional<Event> pe = find_earliest_proximity_event_in_interval(
                         eph_preview, center0, target, time_s_, remaining, threshold, cfg_.events, propagate_sc);
@@ -605,7 +618,7 @@ namespace orbitsim
         double event_step_dt_(const Event &best_event, const double remaining) const
         {
             double dt_event = best_event.t_event_s - time_s_;
-            const double min_step = std::max(0.0, cfg_.events.time_tol_s);
+            const double min_step = min_event_progress_dt_(remaining);
             if (!(dt_event > min_step) || !std::isfinite(dt_event))
             {
                 dt_event = min_step;
@@ -615,6 +628,18 @@ namespace orbitsim
                 dt_event = remaining;
             }
             return dt_event;
+        }
+
+        double min_event_progress_dt_(const double remaining) const
+        {
+            const double abs_remaining = std::abs(remaining);
+            if (!(abs_remaining > 0.0) || !std::isfinite(abs_remaining))
+            {
+                return 0.0;
+            }
+            const double tol = std::max(0.0, cfg_.events.time_tol_s);
+            const double hard_floor = std::max(1e-9, abs_remaining * 1e-12);
+            return std::min(abs_remaining, std::max(tol, hard_floor));
         }
 
         Config cfg_{};

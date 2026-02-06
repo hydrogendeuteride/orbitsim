@@ -16,11 +16,14 @@ namespace orbitsim
      */
     struct LambertOptions
     {
-        /// If true, select prograde transfer (orbit normal aligned with +Z).
-        /// Uses sign of (r1 x r2).z to determine direction.
+        /// If true, prefer transfer sense aligned with `reference_normal_i`; otherwise opposite.
         bool prograde{true};
 
-        /// If true, use short-path transfer (< 180 deg); otherwise long-path.
+        /// Reference normal used for prograde/retrograde sense selection.
+        /// Default is +Z for backward compatibility.
+        Vec3 reference_normal_i{0.0, 0.0, 1.0};
+
+        /// Preferred path length. If this conflicts with `prograde`, branch selection wins.
         bool short_path{true};
 
         /// Maximum revolutions to consider (0 = direct transfer only).
@@ -58,7 +61,7 @@ namespace orbitsim
          * @brief Computes the transfer angle between two position vectors.
          * @param r1 Departure position vector [m].
          * @param r2 Arrival position vector [m].
-         * @param opt Lambert options (prograde/retrograde, short/long path).
+         * @param opt Lambert options (sense, short/long path).
          * @return Transfer angle in radians, or nullopt if degenerate (collinear vectors).
          */
         inline std::optional<double> transfer_angle_(const Vec3 &r1, const Vec3 &r2, const LambertOptions &opt)
@@ -82,30 +85,28 @@ namespace orbitsim
             const double cosT = clamp_cos_(glm::dot(r1, r2) / (r1n * r2n));
             const double theta = std::acos(cosT); // [0, pi]
 
-            const bool alpha_pos = (c.z > 0.0);
-            double dTheta = 0.0;
-            if (opt.prograde)
+            const Vec3 ref_n = normalized_or(opt.reference_normal_i, Vec3{0.0, 0.0, 1.0});
+            double orient = glm::dot(c, ref_n);
+            const double orient_eps = 1e-14 * std::sqrt(c2);
+            if (std::abs(orient) <= orient_eps)
             {
-                dTheta = alpha_pos ? theta : (2.0 * std::acos(-1.0) - theta);
-            }
-            else
-            {
-                dTheta = (!alpha_pos) ? theta : (2.0 * std::acos(-1.0) - theta);
+                // Deterministic fallback when the reference normal is nearly orthogonal to transfer normal.
+                orient = (std::abs(c.z) >= std::max(std::abs(c.x), std::abs(c.y)))
+                                 ? c.z
+                                 : ((std::abs(c.y) >= std::abs(c.x)) ? c.y : c.x);
             }
 
-            if (opt.short_path)
+            const bool alpha_pos = (orient >= 0.0);
+            const double pi = std::acos(-1.0);
+            double dTheta = opt.short_path ? theta : (2.0 * pi - theta);
+
+            // Keep prograde/retrograde branch consistent with reference normal.
+            // If short/long preference conflicts with requested branch, flip to the
+            // complementary path to honor branch selection.
+            const bool dtheta_is_prograde = (dTheta <= pi) ? alpha_pos : (!alpha_pos);
+            if (dtheta_is_prograde != opt.prograde)
             {
-                if (dTheta > std::acos(-1.0))
-                {
-                    dTheta = 2.0 * std::acos(-1.0) - dTheta;
-                }
-            }
-            else
-            {
-                if (dTheta < std::acos(-1.0))
-                {
-                    dTheta = 2.0 * std::acos(-1.0) - dTheta;
-                }
+                dTheta = 2.0 * pi - dTheta;
             }
 
             return dTheta;
@@ -458,4 +459,3 @@ namespace orbitsim
     }
 
 } // namespace orbitsim
-

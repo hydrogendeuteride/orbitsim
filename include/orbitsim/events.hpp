@@ -78,11 +78,82 @@ namespace orbitsim
         double time_tol_s{1e-3}; ///< Bisection convergence tolerance in time
         double dist_tol_m{1e-2}; ///< Bisection convergence tolerance in distance
         int max_bisect_iters{64}; ///< Max iterations for root finding
+        int crossing_scan_substeps{16}; ///< Interior scan slices used before bisection to catch intra-step crossings
         int max_event_splits_per_step{8}; ///< Max timestep subdivisions per step() call
     };
 
     namespace detail
     {
+        struct CrossingBracket
+        {
+            double t0_s{0.0};
+            double t1_s{0.0};
+            double f0{0.0};
+            double f1{0.0};
+        };
+
+        inline bool has_crossing_bracket_(const double f0, const double f1, const double dist_tol_m)
+        {
+            if (!std::isfinite(f0) || !std::isfinite(f1))
+            {
+                return false;
+            }
+            if (std::abs(f0) <= dist_tol_m || std::abs(f1) <= dist_tol_m)
+            {
+                return true;
+            }
+            return (f0 <= 0.0 && f1 >= 0.0) || (f0 >= 0.0 && f1 <= 0.0);
+        }
+
+        template<class EvalF>
+        inline std::optional<CrossingBracket>
+        first_crossing_bracket_s(const double t0_s, const double t1_s, const double f0, const double f1,
+                                 const EventOptions &opt, EvalF eval_f)
+        {
+            if (!(t1_s > t0_s) || !std::isfinite(t0_s) || !std::isfinite(t1_s))
+            {
+                return std::nullopt;
+            }
+
+            const double dist_tol_m = std::max(0.0, opt.dist_tol_m);
+            if (has_crossing_bracket_(f0, f1, dist_tol_m))
+            {
+                return CrossingBracket{.t0_s = t0_s, .t1_s = t1_s, .f0 = f0, .f1 = f1};
+            }
+
+            const int scans = std::max(0, opt.crossing_scan_substeps);
+            if (scans <= 0)
+            {
+                return std::nullopt;
+            }
+
+            const double dt_scan = (t1_s - t0_s) / static_cast<double>(scans);
+            if (!(dt_scan > 0.0) || !std::isfinite(dt_scan))
+            {
+                return std::nullopt;
+            }
+
+            double ta = t0_s;
+            double fa = f0;
+            for (int i = 1; i <= scans; ++i)
+            {
+                const double tb = (i == scans) ? t1_s : (t0_s + dt_scan * static_cast<double>(i));
+                const double fb = eval_f(tb);
+                if (!std::isfinite(fb))
+                {
+                    return std::nullopt;
+                }
+                if (has_crossing_bracket_(fa, fb, dist_tol_m))
+                {
+                    return CrossingBracket{.t0_s = ta, .t1_s = tb, .f0 = fa, .f1 = fb};
+                }
+                ta = tb;
+                fa = fb;
+            }
+
+            return std::nullopt;
+        }
+
         template<class EvalF>
         inline double bisect_crossing_time_s(const double t0_s, const double t1_s, const double f0,
                                              const EventOptions &opt, EvalF eval_f)
@@ -235,18 +306,21 @@ namespace orbitsim
                 }
                 const double f0 = d0 - threshold_m;
                 const double f1 = d1 - threshold_m;
-
-                if (!((f0 <= 0.0 && f1 >= 0.0) || (f0 >= 0.0 && f1 <= 0.0)))
+                const auto eval_f = [&](const double t_s) -> double {
+                    const Spacecraft sc_at = propagate_sc(sc0, t0_s, t_s - t0_s);
+                    return dist_to_body(body_index, t_s, sc_at.state.position_m) - threshold_m;
+                };
+                const std::optional<detail::CrossingBracket> bracket =
+                        detail::first_crossing_bracket_s(t0_s, t1_s, f0, f1, opt, eval_f);
+                if (!bracket.has_value())
                 {
                     continue;
                 }
 
-                const Crossing crossing = (f0 > 0.0 && f1 <= 0.0) ? Crossing::Enter : Crossing::Exit;
+                const Crossing crossing = (bracket->f0 > 0.0 && bracket->f1 <= 0.0) ? Crossing::Enter
+                                                                                      : Crossing::Exit;
                 const double t_event = detail::bisect_crossing_time_s(
-                        t0_s, t1_s, f0, opt, [&](const double t_s) -> double {
-                            const Spacecraft sc_at = propagate_sc(sc0, t0_s, t_s - t0_s);
-                            return dist_to_body(body_index, t_s, sc_at.state.position_m) - threshold_m;
-                        });
+                        bracket->t0_s, bracket->t1_s, bracket->f0, opt, eval_f);
                 if (!std::isfinite(t_event))
                 {
                     continue;
@@ -330,19 +404,21 @@ namespace orbitsim
         }
         const double f0 = d0 - threshold_m;
         const double f1 = d1 - threshold_m;
-
-        if (!((f0 <= 0.0 && f1 >= 0.0) || (f0 >= 0.0 && f1 <= 0.0)))
+        const auto eval_f = [&](const double t_s) -> double {
+            const Spacecraft cm = propagate_sc(center0, t0_s, t_s - t0_s);
+            const Spacecraft tm = propagate_sc(target0, t0_s, t_s - t0_s);
+            return dist_m(t_s, cm.state.position_m, tm.state.position_m) - threshold_m;
+        };
+        const std::optional<detail::CrossingBracket> bracket =
+                detail::first_crossing_bracket_s(t0_s, t1_s, f0, f1, opt, eval_f);
+        if (!bracket.has_value())
         {
             return std::nullopt;
         }
 
-        const Crossing crossing = (f0 > 0.0 && f1 <= 0.0) ? Crossing::Enter : Crossing::Exit;
+        const Crossing crossing = (bracket->f0 > 0.0 && bracket->f1 <= 0.0) ? Crossing::Enter : Crossing::Exit;
         const double t_event = detail::bisect_crossing_time_s(
-                t0_s, t1_s, f0, opt, [&](const double t_s) -> double {
-                    const Spacecraft cm = propagate_sc(center0, t0_s, t_s - t0_s);
-                    const Spacecraft tm = propagate_sc(target0, t0_s, t_s - t0_s);
-                    return dist_m(t_s, cm.state.position_m, tm.state.position_m) - threshold_m;
-                });
+                bracket->t0_s, bracket->t1_s, bracket->f0, opt, eval_f);
         if (!std::isfinite(t_event))
         {
             return std::nullopt;
