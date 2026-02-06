@@ -4,10 +4,9 @@ Lightweight visualization for event-related features emitted by `orbitsim_exampl
 
 It expects the example to print these sections:
   - bodies                    (id,name,radius_m,atmosphere_top_height_m,soi_radius_m)
-  - events_reentry_sc          (t_s,type,body_id,crossing)
-  - reentry_sc_rel_earth       (t_s,x,y,z,vx,vy,vz)  [Earth-relative]
-  - events_moon_soi_sc         (t_s,type,body_id,crossing)
-  - moon_soi_sc_rel_moon       (t_s,x,y,z,vx,vy,vz)  [Moon-relative]
+  - event_probe_catalog       (key,title,body_name,events_section,traj_section)
+  - events_*                  (t_s,type,body_id,crossing)
+  - *_rel_*                   (t_s,x,y,z,vx,vy,vz)
 
 Usage:
   python3 visualize_events.py
@@ -40,6 +39,15 @@ class EventRow:
     crossing: str
 
 
+@dataclass(frozen=True)
+class EventProbeSpec:
+    key: str
+    title: str
+    body_name: str
+    events_section: str
+    traj_section: str
+
+
 def _is_section_header(line: str) -> bool:
     if not line:
         return False
@@ -47,16 +55,22 @@ def _is_section_header(line: str) -> bool:
         return False
     if "," in line:
         return False
-    # section names in this repo are snake_case-ish
     return all(c.isalnum() or c in "_-" for c in line)
 
 
-def parse_output(output: str) -> Tuple[Dict[str, np.ndarray], Dict[int, BodyInfo], Dict[str, List[EventRow]], Dict[str, np.ndarray]]:
+def parse_output(output: str) -> Tuple[
+    Dict[str, np.ndarray],
+    Dict[int, BodyInfo],
+    Dict[str, List[EventRow]],
+    Dict[str, np.ndarray],
+    List[EventProbeSpec],
+]:
     lines = output.splitlines()
     traj: Dict[str, np.ndarray] = {}
     bodies: Dict[int, BodyInfo] = {}
     events: Dict[str, List[EventRow]] = {}
     apsides: Dict[str, np.ndarray] = {}
+    probe_specs: List[EventProbeSpec] = []
 
     current: Optional[str] = None
     rows_floats: List[List[float]] = []
@@ -89,7 +103,28 @@ def parse_output(output: str) -> Tuple[Dict[str, np.ndarray], Dict[int, BodyInfo
                 soi_m = float(parts[4])
             except ValueError:
                 continue
-            bodies[body_id] = BodyInfo(body_id=body_id, name=name, radius_m=radius_m, atmosphere_top_height_m=atmos_m, soi_radius_m=soi_m)
+            bodies[body_id] = BodyInfo(
+                body_id=body_id,
+                name=name,
+                radius_m=radius_m,
+                atmosphere_top_height_m=atmos_m,
+                soi_radius_m=soi_m,
+            )
+            continue
+
+        if current == "event_probe_catalog":
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) != 5:
+                continue
+            probe_specs.append(
+                EventProbeSpec(
+                    key=parts[0],
+                    title=parts[1],
+                    body_name=parts[2].lower(),
+                    events_section=parts[3],
+                    traj_section=parts[4],
+                )
+            )
             continue
 
         if current and current.startswith("events_"):
@@ -103,7 +138,9 @@ def parse_output(output: str) -> Tuple[Dict[str, np.ndarray], Dict[int, BodyInfo
                 crossing = parts[3].strip()
             except ValueError:
                 continue
-            events.setdefault(current, []).append(EventRow(t_s=t_s, type=typ, body_id=body_id, crossing=crossing))
+            events.setdefault(current, []).append(
+                EventRow(t_s=t_s, type=typ, body_id=body_id, crossing=crossing)
+            )
             continue
 
         if current == "apsides_sc_rel_earth_t0":
@@ -118,7 +155,6 @@ def parse_output(output: str) -> Tuple[Dict[str, np.ndarray], Dict[int, BodyInfo
             apsides[label] = xyz
             continue
 
-        # Default: try to parse 7-float trajectory rows.
         parts = line.split(",")
         if len(parts) == 7:
             try:
@@ -129,7 +165,7 @@ def parse_output(output: str) -> Tuple[Dict[str, np.ndarray], Dict[int, BodyInfo
             continue
 
     flush_trajectory()
-    return traj, bodies, events, apsides
+    return traj, bodies, events, apsides, probe_specs
 
 
 def vec_interp_at_t(traj: np.ndarray, t_s: float) -> np.ndarray:
@@ -140,9 +176,35 @@ def vec_interp_at_t(traj: np.ndarray, t_s: float) -> np.ndarray:
     return np.array([x, y, z], dtype=float)
 
 
-def plot_event_panel_xy(ax, traj_xyz_m: np.ndarray, body_radius_m: float, title: str, events: List[EventRow]):
-    x_km = traj_xyz_m[:, 0] / 1000.0
-    y_km = traj_xyz_m[:, 1] / 1000.0
+def clip_trajectory_after_impact(traj_xyz_m: np.ndarray, events: List[EventRow]) -> np.ndarray:
+    impact_times = [e.t_s for e in events if e.type == "impact" and e.crossing == "enter"]
+    if not impact_times:
+        return traj_xyz_m
+    t_impact = min(impact_times)
+    return traj_xyz_m[traj_xyz_m[:, 0] <= (t_impact + 5.0)]
+
+
+def threshold_is_relevant(threshold_m: float, r_m: np.ndarray) -> bool:
+    if not (threshold_m > 0.0 and np.isfinite(threshold_m)):
+        return False
+    r_min = float(np.min(r_m))
+    r_max = float(np.max(r_m))
+    span = max(r_max - r_min, 1.0)
+    lo = r_min - 0.25 * span
+    hi = r_max + 0.50 * span
+    return lo <= threshold_m <= hi
+
+
+def plot_event_panel_xy(
+    ax,
+    traj_xyz_m: np.ndarray,
+    body_radius_m: float,
+    title: str,
+    events: List[EventRow],
+    extra_rings: List[Tuple[str, float, str]],
+):
+    x_km = traj_xyz_m[:, 1] / 1000.0
+    y_km = traj_xyz_m[:, 2] / 1000.0
     ax.plot(x_km, y_km, lw=1.0, color="tab:blue", alpha=0.8)
     ax.scatter([x_km[0]], [y_km[0]], c="g", s=40, marker="o", label="start")
     ax.scatter([x_km[-1]], [y_km[-1]], c="r", s=40, marker="x", label="end")
@@ -150,23 +212,55 @@ def plot_event_panel_xy(ax, traj_xyz_m: np.ndarray, body_radius_m: float, title:
     r_km = body_radius_m / 1000.0
     ax.add_patch(Circle((0.0, 0.0), r_km, color="gray", alpha=0.15, label="body"))
 
+    for label, radius_m, color in extra_rings:
+        ring_km = radius_m / 1000.0
+        labels = ax.get_legend_handles_labels()[1]
+        ax.add_patch(
+            Circle(
+                (0.0, 0.0),
+                ring_km,
+                color=color,
+                fill=False,
+                ls=":",
+                lw=1.0,
+                alpha=0.7,
+                label=label if label not in labels else None,
+            )
+        )
+
     for e in events:
         pos = vec_interp_at_t(traj_xyz_m, e.t_s) / 1000.0
+        labels = ax.get_legend_handles_labels()[1]
         if e.type == "impact":
-            ax.scatter([pos[0]], [pos[1]], c="red", s=60, marker="x", label="impact" if "impact" not in ax.get_legend_handles_labels()[1] else None)
+            ax.scatter([pos[0]], [pos[1]], c="red", s=60, marker="x", label="impact" if "impact" not in labels else None)
         elif e.type == "atmosphere":
-            ax.scatter([pos[0]], [pos[1]], c="orange", s=60, marker="^", label="atmosphere" if "atmosphere" not in ax.get_legend_handles_labels()[1] else None)
+            ax.scatter(
+                [pos[0]],
+                [pos[1]],
+                c="orange",
+                s=60,
+                marker="^",
+                label="atmosphere" if "atmosphere" not in labels else None,
+            )
         elif e.type == "soi":
-            ax.scatter([pos[0]], [pos[1]], c="cyan", s=60, marker="s", label="soi" if "soi" not in ax.get_legend_handles_labels()[1] else None)
+            ax.scatter([pos[0]], [pos[1]], c="cyan", s=60, marker="s", label="soi" if "soi" not in labels else None)
 
     ax.set_title(title)
     ax.set_xlabel("x [km]")
     ax.set_ylabel("y [km]")
     ax.grid(True, alpha=0.3)
     ax.axis("equal")
+    ax.legend(fontsize=8, loc="best")
 
 
-def plot_event_panel_r(ax, traj_xyz_m: np.ndarray, body_info: BodyInfo, title: str, events: List[EventRow], extra_thresholds: List[Tuple[str, float, str]]):
+def plot_event_panel_r(
+    ax,
+    traj_xyz_m: np.ndarray,
+    body_info: BodyInfo,
+    title: str,
+    events: List[EventRow],
+    extra_thresholds: List[Tuple[str, float, str]],
+):
     t_s = traj_xyz_m[:, 0]
     r_m = np.linalg.norm(traj_xyz_m[:, 1:4], axis=1)
 
@@ -185,7 +279,46 @@ def plot_event_panel_r(ax, traj_xyz_m: np.ndarray, body_info: BodyInfo, title: s
     ax.set_xlabel("t [s]")
     ax.set_ylabel("|r| [km]")
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=9, loc="best")
+    ax.legend(fontsize=8, loc="best")
+
+
+def default_probe_specs() -> List[EventProbeSpec]:
+    return [
+        EventProbeSpec(
+            key="reentry_sc",
+            title="Earth reentry impact",
+            body_name="earth",
+            events_section="events_reentry_sc",
+            traj_section="reentry_sc_rel_earth",
+        ),
+        EventProbeSpec(
+            key="moon_soi_sc",
+            title="Moon SOI ingress",
+            body_name="moon",
+            events_section="events_moon_soi_sc",
+            traj_section="moon_soi_sc_rel_moon",
+        ),
+    ]
+
+
+def resolve_body_info(
+    spec: EventProbeSpec,
+    bodies_by_name: Dict[str, BodyInfo],
+    bodies_by_id: Dict[int, BodyInfo],
+    probe_events: List[EventRow],
+    earth_fallback: BodyInfo,
+    moon_fallback: BodyInfo,
+) -> BodyInfo:
+    by_name = bodies_by_name.get(spec.body_name.lower())
+    if by_name is not None:
+        return by_name
+    if probe_events:
+        by_id = bodies_by_id.get(probe_events[0].body_id)
+        if by_id is not None:
+            return by_id
+    if spec.body_name.lower() == "moon":
+        return moon_fallback
+    return earth_fallback
 
 
 def main() -> int:
@@ -203,96 +336,102 @@ def main() -> int:
         print(f"Error running orbitsim_example: {e}", file=sys.stderr)
         return 1
 
-    traj, bodies_by_id, events_by_section, aps = parse_output(result.stdout)
+    traj, bodies_by_id, events_by_section, aps, probe_specs = parse_output(result.stdout)
 
-    # Lookup by name where possible (the example uses stable names).
-    bodies_by_name = {b.name: b for b in bodies_by_id.values()}
-    earth = bodies_by_name.get("earth", BodyInfo(body_id=2, name="earth", radius_m=6.371e6, atmosphere_top_height_m=1.0e5, soi_radius_m=0.0))
-    moon = bodies_by_name.get("moon", BodyInfo(body_id=3, name="moon", radius_m=1.7374e6, atmosphere_top_height_m=0.0, soi_radius_m=6.61e7))
+    bodies_by_name = {b.name.lower(): b for b in bodies_by_id.values()}
+    earth = bodies_by_name.get(
+        "earth",
+        BodyInfo(
+            body_id=2,
+            name="earth",
+            radius_m=6.371e6,
+            atmosphere_top_height_m=1.0e5,
+            soi_radius_m=0.0,
+        ),
+    )
+    moon = bodies_by_name.get(
+        "moon",
+        BodyInfo(
+            body_id=3,
+            name="moon",
+            radius_m=1.7374e6,
+            atmosphere_top_height_m=0.0,
+            soi_radius_m=6.61e7,
+        ),
+    )
 
-    if "reentry_sc_rel_earth" not in traj:
-        print("Error: missing section 'reentry_sc_rel_earth' in output.", file=sys.stderr)
+    if not probe_specs:
+        probe_specs = default_probe_specs()
+
+    available_specs: List[EventProbeSpec] = []
+    for spec in probe_specs:
+        if spec.traj_section in traj:
+            available_specs.append(spec)
+
+    if not available_specs:
+        print("Error: no event probe trajectory sections were found.", file=sys.stderr)
+        print(f"Probe catalog entries: {[s.traj_section for s in probe_specs]}", file=sys.stderr)
         print(f"Found trajectory sections: {list(traj.keys())}", file=sys.stderr)
         return 1
-    if "moon_soi_sc_rel_moon" not in traj:
-        print("Error: missing section 'moon_soi_sc_rel_moon' in output.", file=sys.stderr)
-        print(f"Found trajectory sections: {list(traj.keys())}", file=sys.stderr)
-        return 1
 
-    reentry_traj = traj["reentry_sc_rel_earth"]
-    moon_soi_traj = traj["moon_soi_sc_rel_moon"]
+    fig, axes = plt.subplots(len(available_specs), 2, figsize=(14, 5.0 * len(available_specs)), squeeze=False)
 
-    reentry_events = events_by_section.get("events_reentry_sc", [])
-    moon_soi_events = events_by_section.get("events_moon_soi_sc", [])
+    earth_xy_ax = None
+    for row, spec in enumerate(available_specs):
+        probe_events = events_by_section.get(spec.events_section, [])
+        probe_traj = clip_trajectory_after_impact(traj[spec.traj_section], probe_events)
+        probe_body = resolve_body_info(spec, bodies_by_name, bodies_by_id, probe_events, earth, moon)
 
-    # Clip reentry samples at impact to avoid point-mass singular behavior if someone increases duration later.
-    impact_times = [e.t_s for e in reentry_events if e.type == "impact" and e.crossing == "enter"]
-    if impact_times:
-        t_imp = min(impact_times)
-        reentry_traj = reentry_traj[reentry_traj[:, 0] <= (t_imp + 5.0)]
+        r_m = np.linalg.norm(probe_traj[:, 1:4], axis=1)
+        extra_thresholds: List[Tuple[str, float, str]] = []
+        extra_rings: List[Tuple[str, float, str]] = []
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        atmosphere_top_m = probe_body.radius_m + probe_body.atmosphere_top_height_m
+        if probe_body.atmosphere_top_height_m > 0.0 and threshold_is_relevant(atmosphere_top_m, r_m):
+            extra_thresholds.append(("atmosphere top", atmosphere_top_m, "orange"))
+            extra_rings.append(("atmosphere", atmosphere_top_m, "orange"))
 
-    plot_event_panel_xy(
-        axes[0, 0],
-        reentry_traj,
-        earth.radius_m,
-        "Reentry probe (Earth-relative XY)",
-        reentry_events,
-    )
-    if earth.atmosphere_top_height_m > 0.0:
-        axes[0, 0].add_patch(Circle((0.0, 0.0), (earth.radius_m + earth.atmosphere_top_height_m) / 1000.0, color="orange", fill=False, ls=":", lw=1.0, alpha=0.6))
+        if probe_body.soi_radius_m > 0.0 and threshold_is_relevant(probe_body.soi_radius_m, r_m):
+            extra_thresholds.append(("SOI", probe_body.soi_radius_m, "cyan"))
+            extra_rings.append(("SOI", probe_body.soi_radius_m, "cyan"))
 
-    plot_event_panel_r(
-        axes[0, 1],
-        reentry_traj,
-        earth,
-        "Reentry probe |r| vs time",
-        reentry_events,
-        extra_thresholds=[
-            ("atmosphere top", earth.radius_m + earth.atmosphere_top_height_m, "orange"),
-        ],
-    )
+        plot_event_panel_xy(
+            axes[row, 0],
+            probe_traj,
+            probe_body.radius_m,
+            f"{spec.title} ({probe_body.name}-relative XY)",
+            probe_events,
+            extra_rings,
+        )
+        plot_event_panel_r(
+            axes[row, 1],
+            probe_traj,
+            probe_body,
+            f"{spec.title} |r| vs time",
+            probe_events,
+            extra_thresholds,
+        )
 
-    plot_event_panel_xy(
-        axes[1, 0],
-        moon_soi_traj,
-        moon.radius_m,
-        "Moon SOI probe (Moon-relative XY)",
-        moon_soi_events,
-    )
-    if moon.soi_radius_m > 0.0 and np.isfinite(moon.soi_radius_m):
-        axes[1, 0].add_patch(Circle((0.0, 0.0), moon.soi_radius_m / 1000.0, color="cyan", fill=False, ls=":", lw=1.0, alpha=0.6))
+        if earth_xy_ax is None and probe_body.name.lower() == "earth":
+            earth_xy_ax = axes[row, 0]
 
-    plot_event_panel_r(
-        axes[1, 1],
-        moon_soi_traj,
-        moon,
-        "Moon SOI probe |r| vs time",
-        moon_soi_events,
-        extra_thresholds=[
-            ("SOI", moon.soi_radius_m, "cyan"),
-        ],
-    )
-
-    if aps:
-        # Optional markers for osculating apsides at t=0 in Earth-relative frame.
+    if aps and earth_xy_ax is not None:
         if "peri" in aps:
             p = aps["peri"] / 1000.0
-            axes[0, 0].scatter([p[0]], [p[1]], c="tab:purple", s=60, marker="*", label="peri (t0)")
+            earth_xy_ax.scatter([p[0]], [p[1]], c="tab:purple", s=60, marker="*", label="peri (t0)")
         if "apo" in aps:
             a = aps["apo"] / 1000.0
-            axes[0, 0].scatter([a[0]], [a[1]], c="tab:pink", s=60, marker="*", label="apo (t0)")
-        axes[0, 0].legend(fontsize=9, loc="best")
+            earth_xy_ax.scatter([a[0]], [a[1]], c="tab:pink", s=60, marker="*", label="apo (t0)")
+        earth_xy_ax.legend(fontsize=8, loc="best")
 
     plt.tight_layout()
     out = "events.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
     print(f"Saved: {out}", file=sys.stderr)
-    plt.show()  # comment out for headless environments
+
+    plt.show()
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

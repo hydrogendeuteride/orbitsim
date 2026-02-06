@@ -371,50 +371,95 @@ void output_event_probes(
     const CelestialEphemeris &eph,
     const std::optional<GameSimulation::SpacecraftHandle> &sc_reentry_h,
     const std::optional<GameSimulation::SpacecraftHandle> &sc_moon_soi_h,
+    const std::optional<GameSimulation::SpacecraftHandle> &sc_atmo_skip_h,
+    const std::optional<GameSimulation::SpacecraftHandle> &sc_moon_impact_h,
     const TrajectoryFrameSpec &earth_frame,
     const TrajectoryFrameSpec &moon_frame)
 {
-    // Reentry probe
-    if (sc_reentry_h.has_value() && sc_reentry_h->valid())
+    struct ProbeScenario
     {
-        const auto reentry_opt = trajectory_options()
-            .duration(minutes(12.0))
-            .sample_dt(seconds(1.0))
-            .celestial_dt(seconds(1.0))
-            .max_samples(20'000);
+        const std::optional<GameSimulation::SpacecraftHandle> *handle{nullptr};
+        const char *key{nullptr};
+        const char *title{nullptr};
+        const char *body_name{nullptr};
+        const char *events_section{nullptr};
+        const char *trajectory_section{nullptr};
+        TrajectoryOptions traj_opt{};
+        const TrajectoryFrameSpec *frame{nullptr};
+    };
 
-        std::printf("events_reentry_sc\n");
-        const std::vector<Event> ev_reentry =
-            predict_spacecraft_events(sim, eph, sc_reentry_h->id, reentry_opt);
-        for (const auto &e : ev_reentry)
+    const auto reentry_opt = trajectory_options()
+        .duration(minutes(12.0))
+        .sample_dt(seconds(1.0))
+        .celestial_dt(seconds(1.0))
+        .max_samples(20'000);
+
+    const auto moon_soi_opt = trajectory_options()
+        .duration(hours(6.0))
+        .sample_dt(seconds(10.0))
+        .celestial_dt(seconds(10.0))
+        .max_samples(20'000);
+
+    const auto atmo_skip_opt = trajectory_options()
+        .duration(hours(3.0))
+        .sample_dt(seconds(2.0))
+        .celestial_dt(seconds(2.0))
+        .max_samples(20'000);
+
+    const auto moon_impact_opt = trajectory_options()
+        .duration(minutes(45.0))
+        .sample_dt(seconds(1.0))
+        .celestial_dt(seconds(1.0))
+        .max_samples(20'000);
+
+    const std::vector<ProbeScenario> probes{
+        {&sc_reentry_h, "reentry_sc", "Earth reentry impact", "earth",
+         "events_reentry_sc", "reentry_sc_rel_earth", reentry_opt, &earth_frame},
+        {&sc_atmo_skip_h, "atmo_skip_sc", "Earth atmosphere skip", "earth",
+         "events_atmo_skip_sc", "atmo_skip_sc_rel_earth", atmo_skip_opt, &earth_frame},
+        {&sc_moon_soi_h, "moon_soi_sc", "Moon SOI ingress", "moon",
+         "events_moon_soi_sc", "moon_soi_sc_rel_moon", moon_soi_opt, &moon_frame},
+        {&sc_moon_impact_h, "moon_impact_sc", "Moon direct impact", "moon",
+         "events_moon_impact_sc", "moon_impact_sc_rel_moon", moon_impact_opt, &moon_frame},
+    };
+
+    auto probe_ready = [](const ProbeScenario &probe) -> bool
+    {
+        if (probe.handle == nullptr || probe.frame == nullptr)
         {
-            std::printf("%.6f,%s,%u,%s\n",
-                        e.t_event_s,
-                        event_type_str(e.type),
-                        static_cast<unsigned>(e.body_id),
-                        crossing_str(e.crossing));
+            return false;
         }
+        const auto &handle_opt = *probe.handle;
+        return handle_opt.has_value() && handle_opt->valid();
+    };
 
-        const std::vector<TrajectorySample> sc_reentry_inertial =
-            predict_spacecraft_trajectory(sim, eph, sc_reentry_h->id, reentry_opt);
-        const std::vector<TrajectorySample> sc_reentry_rel_earth =
-            trajectory_to_frame_spec(sc_reentry_inertial, eph, sim.massive_bodies(), earth_frame);
-        print_trajectory_hires("reentry_sc_rel_earth", sc_reentry_rel_earth);
+    std::printf("event_probe_catalog\n");
+    for (const ProbeScenario &probe : probes)
+    {
+        if (!probe_ready(probe))
+        {
+            continue;
+        }
+        std::printf("%s,%s,%s,%s,%s\n",
+                    probe.key,
+                    probe.title,
+                    probe.body_name,
+                    probe.events_section,
+                    probe.trajectory_section);
     }
 
-    // Moon SOI probe
-    if (sc_moon_soi_h.has_value() && sc_moon_soi_h->valid())
+    for (const ProbeScenario &probe : probes)
     {
-        const auto moon_soi_opt = trajectory_options()
-            .duration(hours(4.0))
-            .sample_dt(seconds(10.0))
-            .celestial_dt(seconds(10.0))
-            .max_samples(20'000);
+        if (!probe_ready(probe))
+        {
+            continue;
+        }
+        const auto &handle_opt = *probe.handle;
+        const SpacecraftId probe_id = handle_opt->id;
 
-        std::printf("events_moon_soi_sc\n");
-        const std::vector<Event> ev_soi =
-            predict_spacecraft_events(sim, eph, sc_moon_soi_h->id, moon_soi_opt);
-        for (const auto &e : ev_soi)
+        std::printf("%s\n", probe.events_section);
+        const std::vector<Event> events = predict_spacecraft_events(sim, eph, probe_id, probe.traj_opt);
+        for (const auto &e : events)
         {
             std::printf("%.6f,%s,%u,%s\n",
                         e.t_event_s,
@@ -423,11 +468,11 @@ void output_event_probes(
                         crossing_str(e.crossing));
         }
 
-        const std::vector<TrajectorySample> sc_moon_soi_inertial =
-            predict_spacecraft_trajectory(sim, eph, sc_moon_soi_h->id, moon_soi_opt);
-        const std::vector<TrajectorySample> sc_moon_soi_rel_moon =
-            trajectory_to_frame_spec(sc_moon_soi_inertial, eph, sim.massive_bodies(), moon_frame);
-        print_trajectory_hires("moon_soi_sc_rel_moon", sc_moon_soi_rel_moon);
+        const std::vector<TrajectorySample> sc_inertial =
+            predict_spacecraft_trajectory(sim, eph, probe_id, probe.traj_opt);
+        const std::vector<TrajectorySample> sc_rel =
+            trajectory_to_frame_spec(sc_inertial, eph, sim.massive_bodies(), *probe.frame);
+        print_trajectory_hires(probe.trajectory_section, sc_rel);
     }
 }
 
@@ -747,6 +792,30 @@ int main()
         if (h.valid()) sc_reentry_h = h;
     }
 
+    // Atmosphere skip probe (enters atmosphere and exits without impact)
+    std::optional<GameSimulation::SpacecraftHandle> sc_atmo_skip_h;
+    {
+        const double apogee_alt_m = 160'000.0;
+        const double perigee_alt_m = 80'000.0;
+        const double ra_m = earth_ptr->radius_m + apogee_alt_m;
+        const double rp_m = earth_ptr->radius_m + perigee_alt_m;
+        const double a_m = 0.5 * (ra_m + rp_m);
+        const double mu_earth_m3_s2 = kGravitationalConstant_SI * earth_ptr->mass_kg;
+        const double v_apogee_mps = std::sqrt(mu_earth_m3_s2 * (2.0 / ra_m - 1.0 / a_m));
+
+        const Vec3 r0 = Vec3{ra_m, 0.0, 0.0};
+        const Vec3 v0 = Vec3{0.0, v_apogee_mps, 0.0};
+
+        Spacecraft sc_atmo_skip{
+            .state = make_state(earth_ptr->state.position_m + r0,
+                                earth_ptr->state.velocity_mps + v0),
+            .dry_mass_kg = 100.0,
+            .prop_mass_kg = 0.0,
+        };
+        auto h = sim.create_spacecraft(std::move(sc_atmo_skip));
+        if (h.valid()) sc_atmo_skip_h = h;
+    }
+
     // Moon SOI probe (starts just outside Moon SOI, drifts inward)
     std::optional<GameSimulation::SpacecraftHandle> sc_moon_soi_h;
     {
@@ -761,6 +830,23 @@ int main()
         };
         auto h = sim.create_spacecraft(std::move(sc_moon_soi));
         if (h.valid()) sc_moon_soi_h = h;
+    }
+
+    // Moon impact probe (direct radial descent from low altitude)
+    std::optional<GameSimulation::SpacecraftHandle> sc_moon_impact_h;
+    {
+        const double alt_m = 250'000.0;
+        const Vec3 r0 = Vec3{moon_ptr->radius_m + alt_m, 0.0, 0.0};
+        const Vec3 v0 = Vec3{-250.0, 0.0, 0.0};
+
+        Spacecraft sc_moon_impact{
+            .state = make_state(moon_ptr->state.position_m + r0,
+                                moon_ptr->state.velocity_mps + v0),
+            .dry_mass_kg = 100.0,
+            .prop_mass_kg = 0.0,
+        };
+        auto h = sim.create_spacecraft(std::move(sc_moon_impact));
+        if (h.valid()) sc_moon_impact_h = h;
     }
 
     // -------------------------------------------------------------------------
@@ -868,7 +954,9 @@ int main()
     output_events_section(sim, eph, sc_id, earth_id, traj_opt);
 
     // Section 6: Event probes
-    output_event_probes(sim, eph, sc_reentry_h, sc_moon_soi_h, earth_frame, moon_frame);
+    output_event_probes(sim, eph,
+                        sc_reentry_h, sc_moon_soi_h, sc_atmo_skip_h, sc_moon_impact_h,
+                        earth_frame, moon_frame);
 
     // Section 7: Frame comparison (ECI vs Synodic) - NEW
     output_frame_comparison_example(sim, eph, *earth_ptr, *moon_ptr, earth_id, moon_id);
