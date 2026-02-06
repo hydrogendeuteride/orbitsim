@@ -37,7 +37,19 @@ if (ORBITSIM_ENABLE_GTEST)
         endif ()
     endif ()
 
-    add_executable(orbitsim_gtests tests/orbitsim_gtest.cpp)
+    add_executable(orbitsim_gtests
+            tests/math_gtest.cpp
+            tests/game_simulation_gtest.cpp
+            tests/spacecraft_state_cache_gtest.cpp
+            tests/trajectories_gtest.cpp
+            tests/soi_rails_gtest.cpp
+            tests/frames_gtest.cpp
+            tests/maneuvers_gtest.cpp
+            tests/geodesy_gtest.cpp
+            tests/nodes_gtest.cpp
+            tests/coordinate_frames_gtest.cpp
+            tests/lambert_gtest.cpp
+    )
     target_link_libraries(orbitsim_gtests PRIVATE orbitsim GTest::gtest_main)
 
     include(GoogleTest)

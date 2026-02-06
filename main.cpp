@@ -315,8 +315,7 @@ void output_events_section(
     const CelestialEphemeris &eph,
     SpacecraftId sc_id,
     BodyId earth_id,
-    const TrajectoryOptions &traj_opt,
-    const std::optional<GameSimulation::SpacecraftHandle> &sc_lambert_h)
+    const TrajectoryOptions &traj_opt)
 {
     std::printf("\n--- predicted events/nodes ---\n");
 
@@ -340,18 +339,6 @@ void output_events_section(
     for (const auto &n : eq_nodes)
     {
         std::printf("%.6f,%s\n", n.t_event_s, node_str(n.crossing));
-    }
-
-    // Target plane nodes (if Lambert spacecraft exists)
-    if (sc_lambert_h.has_value() && sc_lambert_h->valid())
-    {
-        std::printf("target_nodes_sc_to_lambert_earth\n");
-        const std::vector<NodeEvent> tgt_nodes =
-            predict_target_plane_nodes(sim, eph, sc_id, sc_lambert_h->id, earth_id, traj_opt);
-        for (const auto &n : tgt_nodes)
-        {
-            std::printf("%.6f,%s\n", n.t_event_s, node_str(n.crossing));
-        }
     }
 
     // Apsides markers
@@ -878,7 +865,7 @@ int main()
                          earth_traj_inertial, moon_traj_inertial);
 
     // Section 5: Events
-    output_events_section(sim, eph, sc_id, earth_id, traj_opt, std::nullopt);
+    output_events_section(sim, eph, sc_id, earth_id, traj_opt);
 
     // Section 6: Event probes
     output_event_probes(sim, eph, sc_reentry_h, sc_moon_soi_h, earth_frame, moon_frame);
