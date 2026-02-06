@@ -1,4 +1,4 @@
-# orbitsim (header-only)
+# orbitsim (header-only library)
 
 Small header-only orbit simulation library intended for games:
 
@@ -17,3 +17,7 @@ Assumptions / conventions:
 
 ## Usage
 See [docs/usage.md](docs/USAGE.md).
+
+## Gallery
+![](lambert_transfer.png)
+![](synodic_frame.png)
