@@ -1,7 +1,7 @@
 #pragma once
 
 #include "orbitsim/ephemeris.hpp"
-#include "orbitsim/maneuvers.hpp"
+#include "orbitsim/maneuvers_types.hpp"
 #include "orbitsim/types.hpp"
 
 #include <algorithm>
