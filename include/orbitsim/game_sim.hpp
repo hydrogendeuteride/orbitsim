@@ -1,5 +1,7 @@
 #pragma once
 
+#include "orbitsim/detail/proximity_tracking.hpp"
+#include "orbitsim/detail/simulation_stepping.hpp"
 #include "orbitsim/detail/spacecraft_propagation.hpp"
 #include "orbitsim/ephemeris.hpp"
 #include "orbitsim/events.hpp"
@@ -393,35 +395,31 @@ namespace orbitsim
             {
                 return;
             }
-            if (!cfg_.enable_events || cfg_.events.max_event_splits_per_step <= 0)
-            {
-                do_step_no_events_(dt_s);
-                return;
-            }
-            if (dt_s < 0.0)
+
+            auto step_no_events = [&](const double step_dt_s) {
+                detail::step_no_events(massive_, spacecraft_, time_s_, step_dt_s, plan_, cfg_.gravitational_constant,
+                                       cfg_.softening_length_m, cfg_.spacecraft_integrator);
+            };
+
+            if (dt_s < 0.0 || !cfg_.enable_events || cfg_.events.max_event_splits_per_step <= 0)
             {
                 // Backwards integration with event splitting is not supported.
-                do_step_no_events_(dt_s);
+                step_no_events(dt_s);
                 return;
             }
 
             sort_plan(plan_);
 
-            const bool proximity_enabled =
-                    cfg_.proximity.enable && (cfg_.proximity.center_spacecraft_id != kInvalidSpacecraftId) &&
-                    (cfg_.proximity.enter_radius_m > 0.0) && std::isfinite(cfg_.proximity.enter_radius_m) &&
-                    (cfg_.proximity.exit_radius_m > 0.0) && std::isfinite(cfg_.proximity.exit_radius_m);
-
-            const double proximity_enter_m = proximity_enabled ? cfg_.proximity.enter_radius_m : 0.0;
-            const double proximity_exit_m =
-                    proximity_enabled ? std::max(cfg_.proximity.enter_radius_m, cfg_.proximity.exit_radius_m) : 0.0;
+            const detail::ProximityConfig prox = detail::resolve_proximity_config(
+                    cfg_.proximity.enable, cfg_.proximity.center_spacecraft_id, cfg_.proximity.enter_radius_m,
+                    cfg_.proximity.exit_radius_m);
 
             // Initialize/refresh proximity active set when enabled or center changes.
-            if (proximity_enabled)
+            if (prox.enabled)
             {
-                if (proximity_center_id_ != cfg_.proximity.center_spacecraft_id)
+                if (proximity_center_id_ != prox.center_id)
                 {
-                    proximity_center_id_ = cfg_.proximity.center_spacecraft_id;
+                    proximity_center_id_ = prox.center_id;
                     proximity_active_.clear();
                     proximity_initialized_ = false;
                 }
@@ -434,19 +432,9 @@ namespace orbitsim
                 }
                 else if (!proximity_initialized_)
                 {
-                    // Treat anything within the exit radius as active at initialization.
-                    for (const auto &sc: spacecraft_)
-                    {
-                        if (sc.id == proximity_center_id_)
-                        {
-                            continue;
-                        }
-                        const double d = glm::length(sc.state.position_m - center_ptr->state.position_m);
-                        if (d <= proximity_exit_m)
-                        {
-                            proximity_active_.insert(sc.id);
-                        }
-                    }
+                    detail::initialize_proximity_active_set(spacecraft_, center_ptr->state.position_m,
+                                                            proximity_center_id_, prox.exit_radius_m,
+                                                            proximity_active_);
                     proximity_initialized_ = true;
                 }
             }
@@ -459,22 +447,25 @@ namespace orbitsim
 
             double remaining = dt_s;
             int splits = 0;
-            while (remaining > 0.0 && splits++ < std::max(1, cfg_.events.max_event_splits_per_step))
+            const int max_splits = std::max(1, cfg_.events.max_event_splits_per_step);
+            while (remaining > 0.0 && splits++ < max_splits)
             {
                 // Preview a full remaining step to build a single ephemeris segment for event search.
                 std::vector<MassiveBody> massive_preview = massive_;
-                std::vector<Spacecraft> spacecraft_preview = spacecraft_;
                 double t_preview = time_s_;
 
                 CelestialEphemerisSegment eph_preview{};
-                preview_step_no_events_(massive_preview, spacecraft_preview, t_preview, remaining, &eph_preview);
+                detail::preview_step_massive_bodies(massive_preview, t_preview, remaining,
+                                                    cfg_.gravitational_constant, cfg_.softening_length_m, &eph_preview);
 
                 std::optional<Event> best;
                 std::vector<Spacecraft> spacecraft_end(spacecraft_.size());
 
                 auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
                                         const double dt_sc_s) -> Spacecraft {
-                    return propagate_spacecraft_(sc_start, eph_preview, t0_s, dt_sc_s, spacecraft_);
+                    return detail::propagate_spacecraft_with_cache(
+                            sc_start, massive_, eph_preview, plan_, cfg_.gravitational_constant,
+                            cfg_.softening_length_m, cfg_.spacecraft_integrator, t0_s, dt_sc_s, spacecraft_);
                 };
 
                 // Boundary events (impact/atmosphere/SOI) for all spacecraft.
@@ -492,7 +483,7 @@ namespace orbitsim
                 }
 
                 // Proximity events: one center spacecraft vs all targets.
-                if (proximity_enabled && proximity_center_id_ != kInvalidSpacecraftId)
+                if (prox.enabled && proximity_center_id_ != kInvalidSpacecraftId)
                 {
                     const Spacecraft *center_ptr = spacecraft_by_id(proximity_center_id_);
                     if (center_ptr != nullptr)
@@ -505,7 +496,7 @@ namespace orbitsim
                                         ? spacecraft_end[center_it->second]
                                         : center0;
 
-                        for (const auto &target: spacecraft_)
+                        for (const auto &target : spacecraft_)
                         {
                             if (target.id == proximity_center_id_)
                             {
@@ -513,9 +504,9 @@ namespace orbitsim
                             }
 
                             const bool active = proximity_active_.contains(target.id);
-                            const double threshold = active ? proximity_exit_m : proximity_enter_m;
+                            const double threshold = active ? prox.exit_radius_m : prox.enter_radius_m;
 
-                            // Endpoint sign check using cached endpoint propagation.
+                            // Endpoint pre-check: skip full bisection when no sign change is possible.
                             Spacecraft target1 = target;
                             {
                                 const auto it = spacecraft_id_to_index_.find(target.id);
@@ -537,30 +528,13 @@ namespace orbitsim
                                 continue;
                             }
 
-                            const Crossing crossing = (f0 > 0.0 && f1 <= 0.0) ? Crossing::Enter : Crossing::Exit;
-                            const double t_event = detail::bisect_crossing_time_s(
-                                    time_s_, time_s_ + remaining, f0, cfg_.events, [&](const double t_s) -> double {
-                                        const Spacecraft cm = propagate_sc(center0, time_s_, t_s - time_s_);
-                                        const Spacecraft tm = propagate_sc(target, time_s_, t_s - time_s_);
-                                        return glm::length(tm.state.position_m - cm.state.position_m) - threshold;
-                                    });
-                            if (!std::isfinite(t_event))
-                            {
-                                continue;
-                            }
+                            const std::optional<Event> pe = find_earliest_proximity_event_in_interval(
+                                    eph_preview, center0, target, time_s_, remaining, threshold, cfg_.events,
+                                    propagate_sc);
 
-                            const Event e = Event{
-                                    .type = EventType::Proximity,
-                                    .body_id = kInvalidBodyId,
-                                    .crossing = crossing,
-                                    .t_event_s = t_event,
-                                    .spacecraft_id = target.id,
-                                    .other_spacecraft_id = center0.id,
-                            };
-
-                            if (!best.has_value() || e.t_event_s < best->t_event_s)
+                            if (pe.has_value() && (!best.has_value() || pe->t_event_s < best->t_event_s))
                             {
-                                best = e;
+                                best = pe;
                             }
                         }
                     }
@@ -569,7 +543,7 @@ namespace orbitsim
                 if (!best.has_value())
                 {
                     // No events found: apply preview result for massive bodies to avoid recomputation,
-                    // but still need to propagate spacecraft since preview_step_no_events_ skips them.
+                    // but still need to propagate spacecraft since preview_step_massive_bodies skips them.
                     massive_ = std::move(massive_preview);
                     spacecraft_ = std::move(spacecraft_end);
 
@@ -595,157 +569,22 @@ namespace orbitsim
                     out_events->push_back(e);
                 }
 
-                do_step_no_events_(dt_event);
+                step_no_events(dt_event);
 
                 if (best->type == EventType::Proximity)
                 {
-                    if (best->crossing == Crossing::Enter)
-                    {
-                        proximity_active_.insert(best->spacecraft_id);
-                    }
-                    else
-                    {
-                        proximity_active_.erase(best->spacecraft_id);
-                    }
+                    detail::update_proximity_active_set(best->spacecraft_id, best->crossing, proximity_active_);
                 }
                 remaining -= dt_event;
             }
 
             if (remaining > 0.0)
             {
-                do_step_no_events_(remaining);
+                step_no_events(remaining);
             }
         }
 
     private:
-        /** @brief Create ephemeris segment from start/end body states. */
-        inline CelestialEphemerisSegment make_segment_(const std::vector<State> &start, const std::vector<State> &end,
-                                                       const double t0_s, const double dt_s) const
-        {
-            CelestialEphemerisSegment eph;
-            eph.t0_s = t0_s;
-            eph.dt_s = dt_s;
-            eph.start = start;
-            eph.end = end;
-            return eph;
-        }
-
-        /** @brief Propagate spacecraft through ephemeris segment with maneuvers. */
-        inline Spacecraft propagate_spacecraft_(const Spacecraft &sc0, const CelestialEphemerisSegment &eph,
-                                                const double t0_s, const double dt_s,
-                                                const std::vector<Spacecraft> &spacecraft_at_t0) const
-        {
-            if (dt_s < 0.0)
-            {
-                // Backward propagation is gravity-only in propagate_spacecraft_in_ephemeris, so no LVLH lookup needed.
-                return detail::propagate_spacecraft_in_ephemeris(
-                        sc0, massive_, eph, plan_, cfg_.gravitational_constant, cfg_.softening_length_m,
-                        cfg_.spacecraft_integrator, t0_s, dt_s, nullptr);
-            }
-
-            const double t_end_s = t0_s + dt_s;
-            const double lookup_dt = [&]() -> double {
-                const double max_step = cfg_.spacecraft_integrator.max_step_s;
-                if (max_step > 0.0 && std::isfinite(max_step))
-                {
-                    return max_step;
-                }
-                const double abs_dt = std::abs(dt_s);
-                if (abs_dt > 0.0 && std::isfinite(abs_dt))
-                {
-                    return std::min(abs_dt, 1.0);
-                }
-                return 0.0;
-            }();
-
-            SpacecraftStateCache<CelestialEphemerisSegment> sc_cache(
-                    massive_,
-                    eph,
-                    plan_,
-                    cfg_.gravitational_constant,
-                    cfg_.softening_length_m,
-                    cfg_.spacecraft_integrator,
-                    t0_s,
-                    t_end_s,
-                    [&](const SpacecraftId id) -> const Spacecraft * {
-                        for (const auto &sc: spacecraft_at_t0)
-                        {
-                            if (sc.id == id)
-                            {
-                                return &sc;
-                            }
-                        }
-                        return nullptr;
-                    },
-                    SpacecraftStateCache<CelestialEphemerisSegment>::Options{.lookup_dt_s = lookup_dt});
-            const SpacecraftStateLookup sc_lookup = sc_cache.lookup();
-
-            return detail::propagate_spacecraft_in_ephemeris(sc0, massive_, eph, plan_, cfg_.gravitational_constant,
-                                                             cfg_.softening_length_m, cfg_.spacecraft_integrator, t0_s,
-                                                             dt_s, sc_lookup);
-        }
-
-        /** @brief Preview step for massive bodies only (for event search). */
-        inline void preview_step_no_events_(std::vector<MassiveBody> &massive, std::vector<Spacecraft> &spacecraft,
-                                            double &t_s, const double dt_s, CelestialEphemerisSegment *out_eph) const
-        {
-            if (out_eph != nullptr)
-            {
-                *out_eph = {};
-            }
-            if (!(dt_s != 0.0) || !std::isfinite(dt_s))
-            {
-                return;
-            }
-
-            std::vector<State> start_states;
-            detail::snapshot_states(massive, &start_states);
-
-            symplectic4_step(massive, dt_s, cfg_.gravitational_constant, cfg_.softening_length_m);
-
-            std::vector<State> end_states;
-            detail::snapshot_states(massive, &end_states);
-
-            CelestialEphemerisSegment eph = make_segment_(start_states, end_states, t_s, dt_s);
-            if (out_eph != nullptr)
-            {
-                *out_eph = eph;
-            }
-
-            // Note: spacecraft preview ignores the maneuver plan mass/prop changes in the output container; event
-            // search re-propagates from the true start state via propagate_spacecraft_ anyway.
-            (void) spacecraft;
-            t_s += dt_s;
-        }
-
-        /** @brief Execute a single timestep without event subdivision. */
-        inline void do_step_no_events_(const double dt_s)
-        {
-            if (!(dt_s != 0.0) || !std::isfinite(dt_s))
-            {
-                return;
-            }
-
-            std::vector<State> start_states;
-            detail::snapshot_states(massive_, &start_states);
-
-            symplectic4_step(massive_, dt_s, cfg_.gravitational_constant, cfg_.softening_length_m);
-
-            std::vector<State> end_states;
-            detail::snapshot_states(massive_, &end_states);
-
-            const CelestialEphemerisSegment eph = make_segment_(start_states, end_states, time_s_, dt_s);
-
-            const std::vector<Spacecraft> spacecraft_start = spacecraft_;
-            for (std::size_t sc_index = 0; sc_index < spacecraft_.size(); ++sc_index)
-            {
-                spacecraft_[sc_index] =
-                        propagate_spacecraft_(spacecraft_start[sc_index], eph, time_s_, dt_s, spacecraft_start);
-            }
-
-            time_s_ += dt_s;
-        }
-
         Config cfg_{};
         double time_s_{0.0}; ///< Current simulation time
         std::vector<MassiveBody> massive_{}; ///< All massive bodies

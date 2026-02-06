@@ -60,14 +60,20 @@ namespace orbitsim
                 SpacecraftStateCache<CelestialEphemeris>::Options{.lookup_dt_s = lookup_dt});
         }
 
-        // ---- Generic spacecraft event prediction (SOI, atmosphere, impact) ----
+        // ---- Common ephemeris event-scan loop ----
 
-        inline std::vector<Event> predict_spacecraft_events_from_ephemeris_by_id_(
+        /// Walks ephemeris segments, propagating a spacecraft and collecting
+        /// events detected by `find_event`.  `is_terminal` can stop early.
+        ///
+        /// FindEventFn : (seg, sc, t, remaining, propagate_sc, *sc1) -> optional<EventT>
+        /// IsTerminalFn: (EventT) -> bool
+        template<class EventT, class FindEventFn, class IsTerminalFn>
+        inline std::vector<EventT> scan_ephemeris_for_events_(
             const GameSimulation &sim, const CelestialEphemeris &eph,
             const SpacecraftId spacecraft_id, const TrajectoryOptions &traj_opt,
-            const EventOptions &event_opt)
+            const EventOptions &opt, FindEventFn find_event, IsTerminalFn is_terminal)
         {
-            std::vector<Event> out;
+            std::vector<EventT> out;
 
             const Spacecraft *sc_ptr = sim.spacecraft_by_id(spacecraft_id);
             if (!sc_ptr || eph.empty() || !(traj_opt.duration_s > 0.0))
@@ -80,7 +86,7 @@ namespace orbitsim
 
             auto sc_cache = make_sc_cache_(sim, eph, t0, t_end, compute_spacecraft_lookup_dt_(traj_opt));
             const SpacecraftStateLookup sc_lookup = sc_cache.lookup();
-            const double nudge = event_nudge_dt_(event_opt);
+            const double nudge = event_nudge_dt_(opt);
 
             for (const auto &seg : eph.segments)
             {
@@ -103,9 +109,7 @@ namespace orbitsim
                 while (remaining > 0.0)
                 {
                     Spacecraft sc1{};
-                    const auto e = find_earliest_event_in_interval(
-                        sim.massive_bodies(), seg, sc, t, remaining, sim.maneuver_plan(), event_opt,
-                        propagate_sc, &sc1);
+                    const auto e = find_event(seg, sc, t, remaining, propagate_sc, &sc1);
 
                     if (!e)
                     {
@@ -121,11 +125,11 @@ namespace orbitsim
                     sc = propagate_sc(sc, t, dt_event);
                     t += dt_event;
 
-                    Event logged = *e;
+                    EventT logged = *e;
                     logged.t_event_s = t;
                     out.push_back(logged);
 
-                    if (is_terminal_event_(logged))
+                    if (is_terminal(logged))
                         return out;
 
                     const double step = std::min(nudge, std::min(seg_end, t_end) - t);
@@ -142,6 +146,24 @@ namespace orbitsim
             return out;
         }
 
+        // ---- Generic spacecraft event prediction (SOI, atmosphere, impact) ----
+
+        inline std::vector<Event> predict_spacecraft_events_from_ephemeris_by_id_(
+            const GameSimulation &sim, const CelestialEphemeris &eph,
+            const SpacecraftId spacecraft_id, const TrajectoryOptions &traj_opt,
+            const EventOptions &event_opt)
+        {
+            return scan_ephemeris_for_events_<Event>(
+                sim, eph, spacecraft_id, traj_opt, event_opt,
+                [&](const auto &seg, const Spacecraft &sc, double t, double remaining,
+                    auto propagate_sc, Spacecraft *sc1) {
+                    return find_earliest_event_in_interval(
+                        sim.massive_bodies(), seg, sc, t, remaining, sim.maneuver_plan(),
+                        event_opt, propagate_sc, sc1);
+                },
+                [](const Event &e) { return is_terminal_event_(e); });
+        }
+
         // ---- Apsis event detection (periapsis / apoapsis) ----
 
         template<class EphemerisLike, class Propagator>
@@ -154,7 +176,7 @@ namespace orbitsim
             if (!(dt_s > 0.0) || opt.max_bisect_iters <= 0)
                 return std::nullopt;
 
-            const auto primary_idx = body_index_for_id_(bodies, primary_body_id);
+            const auto primary_idx = body_index_for_id(bodies, primary_body_id);
             if (!primary_idx)
                 return std::nullopt;
 
@@ -212,76 +234,17 @@ namespace orbitsim
             const SpacecraftId spacecraft_id, const BodyId primary_body_id,
             const TrajectoryOptions &traj_opt, const EventOptions &opt)
         {
-            std::vector<ApsisEvent> out;
-
-            const Spacecraft *sc_ptr = sim.spacecraft_by_id(spacecraft_id);
-            if (!sc_ptr || eph.empty() || !(traj_opt.duration_s > 0.0) || !sim.has_body(primary_body_id))
-                return out;
-
-            const double t0 = sim.time_s();
-            const double t_end = t0 + traj_opt.duration_s;
-            Spacecraft sc = *sc_ptr;
-            double t = t0;
-
-            auto sc_cache = make_sc_cache_(sim, eph, t0, t_end, compute_spacecraft_lookup_dt_(traj_opt));
-            const SpacecraftStateLookup sc_lookup = sc_cache.lookup();
-            const double nudge = event_nudge_dt_(opt);
-
-            for (const auto &seg : eph.segments)
-            {
-                const double seg_end = seg.t0_s + seg.dt_s;
-                if (seg_end <= t) continue;
-                if (seg.t0_s >= t_end) break;
-
-                t = std::max(t, seg.t0_s);
-                double remaining = std::min(seg_end, t_end) - t;
-                if (remaining <= 0.0) continue;
-
-                auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
-                                        const double dt_sc_s) -> Spacecraft {
-                    return propagate_spacecraft_in_ephemeris(
-                        sc_start, sim.massive_bodies(), seg, sim.maneuver_plan(),
-                        sim.config().gravitational_constant, sim.config().softening_length_m,
-                        sim.config().spacecraft_integrator, t0_s, dt_sc_s, sc_lookup);
-                };
-
-                while (remaining > 0.0)
-                {
-                    Spacecraft sc1{};
-                    const auto e = find_earliest_apsis_event_in_interval_(
-                        sim.massive_bodies(), seg, sc, t, remaining, primary_body_id, opt,
-                        propagate_sc, &sc1);
-
-                    if (!e)
-                    {
-                        sc = sc1;
-                        t += remaining;
-                        break;
-                    }
-
-                    double dt_event = e->t_event_s - t;
-                    if (!(dt_event >= 0.0)) dt_event = 0.0;
-                    if (dt_event > remaining) dt_event = remaining;
-
-                    sc = propagate_sc(sc, t, dt_event);
-                    t += dt_event;
-
-                    ApsisEvent logged = *e;
-                    logged.t_event_s = t;
-                    out.push_back(logged);
-
-                    const double step = std::min(nudge, std::min(seg_end, t_end) - t);
-                    if (step <= 0.0) break;
-
-                    sc = propagate_sc(sc, t, step);
-                    t += step;
-                    remaining = std::min(seg_end, t_end) - t;
-                }
-
-                if (t >= t_end) break;
-            }
-
-            return out;
+            if (!sim.has_body(primary_body_id))
+                return {};
+            return scan_ephemeris_for_events_<ApsisEvent>(
+                sim, eph, spacecraft_id, traj_opt, opt,
+                [&](const auto &seg, const Spacecraft &sc, double t, double remaining,
+                    auto propagate_sc, Spacecraft *sc1) {
+                    return find_earliest_apsis_event_in_interval_(
+                        sim.massive_bodies(), seg, sc, t, remaining, primary_body_id,
+                        opt, propagate_sc, sc1);
+                },
+                [](const ApsisEvent &) { return false; });
         }
 
         // ---- Plane node prediction (ascending / descending nodes) ----
@@ -292,107 +255,51 @@ namespace orbitsim
             const Vec3 &plane_normal_unit_i, const SpacecraftId target_spacecraft_id,
             const TrajectoryOptions &traj_opt, const EventOptions &opt)
         {
-            std::vector<NodeEvent> out;
-
-            const Spacecraft *sc_ptr = sim.spacecraft_by_id(spacecraft_id);
-            if (!sc_ptr || eph.empty() || !(traj_opt.duration_s > 0.0) || !sim.body_by_id(primary_body_id))
-                return out;
-
-            const double t0 = sim.time_s();
-            const double t_end = t0 + traj_opt.duration_s;
-            Spacecraft sc = *sc_ptr;
-            double t = t0;
-
-            auto sc_cache = make_sc_cache_(sim, eph, t0, t_end, compute_spacecraft_lookup_dt_(traj_opt));
-            const SpacecraftStateLookup sc_lookup = sc_cache.lookup();
-            const double nudge = event_nudge_dt_(opt);
-
-            for (const auto &seg : eph.segments)
-            {
-                const double seg_end = seg.t0_s + seg.dt_s;
-                if (seg_end <= t) continue;
-                if (seg.t0_s >= t_end) break;
-
-                t = std::max(t, seg.t0_s);
-                double remaining = std::min(seg_end, t_end) - t;
-                if (remaining <= 0.0) continue;
-
-                auto propagate_sc = [&](const Spacecraft &sc_start, const double t0_s,
-                                        const double dt_sc_s) -> Spacecraft {
-                    return propagate_spacecraft_in_ephemeris(
-                        sc_start, sim.massive_bodies(), seg, sim.maneuver_plan(),
-                        sim.config().gravitational_constant, sim.config().softening_length_m,
-                        sim.config().spacecraft_integrator, t0_s, dt_sc_s, sc_lookup);
-                };
-
-                while (remaining > 0.0)
-                {
-                    Spacecraft sc1{};
-                    const auto e = find_earliest_plane_node_in_interval_(
+            if (!sim.body_by_id(primary_body_id))
+                return {};
+            return scan_ephemeris_for_events_<NodeEvent>(
+                sim, eph, spacecraft_id, traj_opt, opt,
+                [&](const auto &seg, const Spacecraft &sc, double t, double remaining,
+                    auto propagate_sc, Spacecraft *sc1) {
+                    return find_earliest_plane_node_in_interval_(
                         sim.massive_bodies(), seg, sc, t, remaining, primary_body_id,
-                        plane_normal_unit_i, target_spacecraft_id, opt, propagate_sc, &sc1);
-
-                    if (!e)
-                    {
-                        sc = sc1;
-                        t += remaining;
-                        break;
-                    }
-
-                    double dt_event = e->t_event_s - t;
-                    if (!(dt_event >= 0.0)) dt_event = 0.0;
-                    if (dt_event > remaining) dt_event = remaining;
-
-                    sc = propagate_sc(sc, t, dt_event);
-                    t += dt_event;
-
-                    NodeEvent logged = *e;
-                    logged.t_event_s = t;
-                    out.push_back(logged);
-
-                    const double step = std::min(nudge, std::min(seg_end, t_end) - t);
-                    if (step <= 0.0) break;
-
-                    sc = propagate_sc(sc, t, step);
-                    t += step;
-                    remaining = std::min(seg_end, t_end) - t;
-                }
-
-                if (t >= t_end) break;
-            }
-
-            return out;
+                        plane_normal_unit_i, target_spacecraft_id, opt, propagate_sc, sc1);
+                },
+                [](const NodeEvent &) { return false; });
         }
 
+    } // namespace detail
+
+    // ---- Public API helpers ----
+
+    namespace detail
+    {
+        inline const EventOptions &resolve_event_opt_(
+            const GameSimulation &sim, const std::optional<EventOptions> &opt)
+        {
+            return opt ? *opt : sim.config().events;
+        }
     } // namespace detail
 
     // ---- Public API: Spacecraft Events ----
 
     inline std::vector<Event> predict_spacecraft_events(
         const GameSimulation &sim, const CelestialEphemeris &eph,
-        const SpacecraftId spacecraft_id, const TrajectoryOptions &opt, const EventOptions &event_opt)
+        const SpacecraftId spacecraft_id,
+        const TrajectoryOptions &opt = {},
+        std::optional<EventOptions> event_opt = std::nullopt)
     {
-        return detail::predict_spacecraft_events_from_ephemeris_by_id_(sim, eph, spacecraft_id, opt, event_opt);
-    }
-
-    inline std::vector<Event> predict_spacecraft_events(
-        const GameSimulation &sim, const CelestialEphemeris &eph,
-        const SpacecraftId spacecraft_id, const TrajectoryOptions &opt = {})
-    {
-        return predict_spacecraft_events(sim, eph, spacecraft_id, opt, sim.config().events);
+        return detail::predict_spacecraft_events_from_ephemeris_by_id_(
+            sim, eph, spacecraft_id, opt, detail::resolve_event_opt_(sim, event_opt));
     }
 
     inline std::vector<Event> predict_spacecraft_events(
         const GameSimulation &sim, const SpacecraftId spacecraft_id,
-        const TrajectoryOptions &opt, const EventOptions &event_opt)
+        const TrajectoryOptions &opt = {},
+        std::optional<EventOptions> event_opt = std::nullopt)
     {
-        return predict_spacecraft_events(sim, build_celestial_ephemeris(sim, opt), spacecraft_id, opt, event_opt);
-    }
-
-    inline std::vector<Event> predict_spacecraft_events(
-        const GameSimulation &sim, const SpacecraftId spacecraft_id, const TrajectoryOptions &opt = {})
-    {
-        return predict_spacecraft_events(sim, build_celestial_ephemeris(sim, opt), spacecraft_id, opt, sim.config().events);
+        return predict_spacecraft_events(
+            sim, build_celestial_ephemeris(sim, opt), spacecraft_id, opt, event_opt);
     }
 
     // ---- Public API: Apsis Events ----
@@ -400,30 +307,22 @@ namespace orbitsim
     inline std::vector<ApsisEvent> predict_apsis_events(
         const GameSimulation &sim, const CelestialEphemeris &eph,
         const SpacecraftId spacecraft_id, const BodyId primary_body_id,
-        const TrajectoryOptions &opt, const EventOptions &event_opt)
+        const TrajectoryOptions &opt = {},
+        std::optional<EventOptions> event_opt = std::nullopt)
     {
-        return detail::predict_apsis_events_from_ephemeris_by_id_(sim, eph, spacecraft_id, primary_body_id, opt, event_opt);
-    }
-
-    inline std::vector<ApsisEvent> predict_apsis_events(
-        const GameSimulation &sim, const CelestialEphemeris &eph,
-        const SpacecraftId spacecraft_id, const BodyId primary_body_id, const TrajectoryOptions &opt = {})
-    {
-        return predict_apsis_events(sim, eph, spacecraft_id, primary_body_id, opt, sim.config().events);
+        return detail::predict_apsis_events_from_ephemeris_by_id_(
+            sim, eph, spacecraft_id, primary_body_id, opt,
+            detail::resolve_event_opt_(sim, event_opt));
     }
 
     inline std::vector<ApsisEvent> predict_apsis_events(
         const GameSimulation &sim, const SpacecraftId spacecraft_id,
-        const BodyId primary_body_id, const TrajectoryOptions &opt, const EventOptions &event_opt)
+        const BodyId primary_body_id,
+        const TrajectoryOptions &opt = {},
+        std::optional<EventOptions> event_opt = std::nullopt)
     {
-        return predict_apsis_events(sim, build_celestial_ephemeris(sim, opt), spacecraft_id, primary_body_id, opt, event_opt);
-    }
-
-    inline std::vector<ApsisEvent> predict_apsis_events(
-        const GameSimulation &sim, const SpacecraftId spacecraft_id,
-        const BodyId primary_body_id, const TrajectoryOptions &opt = {})
-    {
-        return predict_apsis_events(sim, build_celestial_ephemeris(sim, opt), spacecraft_id, primary_body_id, opt, sim.config().events);
+        return predict_apsis_events(
+            sim, build_celestial_ephemeris(sim, opt), spacecraft_id, primary_body_id, opt, event_opt);
     }
 
     // ---- Public API: Equatorial Nodes ----
@@ -431,7 +330,8 @@ namespace orbitsim
     inline std::vector<NodeEvent> predict_equatorial_nodes(
         const GameSimulation &sim, const CelestialEphemeris &eph,
         const SpacecraftId spacecraft_id, const BodyId primary_body_id,
-        const TrajectoryOptions &opt, const EventOptions &node_opt)
+        const TrajectoryOptions &opt = {},
+        std::optional<EventOptions> node_opt = std::nullopt)
     {
         const MassiveBody *primary = sim.body_by_id(primary_body_id);
         if (!primary)
@@ -440,28 +340,18 @@ namespace orbitsim
         if (!axis)
             return {};
         return detail::predict_plane_nodes_from_ephemeris_by_id_(
-            sim, eph, spacecraft_id, primary_body_id, *axis, kInvalidSpacecraftId, opt, node_opt);
-    }
-
-    inline std::vector<NodeEvent> predict_equatorial_nodes(
-        const GameSimulation &sim, const CelestialEphemeris &eph,
-        const SpacecraftId spacecraft_id, const BodyId primary_body_id, const TrajectoryOptions &opt = {})
-    {
-        return predict_equatorial_nodes(sim, eph, spacecraft_id, primary_body_id, opt, sim.config().events);
+            sim, eph, spacecraft_id, primary_body_id, *axis, kInvalidSpacecraftId,
+            opt, detail::resolve_event_opt_(sim, node_opt));
     }
 
     inline std::vector<NodeEvent> predict_equatorial_nodes(
         const GameSimulation &sim, const SpacecraftId spacecraft_id,
-        const BodyId primary_body_id, const TrajectoryOptions &opt, const EventOptions &node_opt)
+        const BodyId primary_body_id,
+        const TrajectoryOptions &opt = {},
+        std::optional<EventOptions> node_opt = std::nullopt)
     {
-        return predict_equatorial_nodes(sim, build_celestial_ephemeris(sim, opt), spacecraft_id, primary_body_id, opt, node_opt);
-    }
-
-    inline std::vector<NodeEvent> predict_equatorial_nodes(
-        const GameSimulation &sim, const SpacecraftId spacecraft_id,
-        const BodyId primary_body_id, const TrajectoryOptions &opt = {})
-    {
-        return predict_equatorial_nodes(sim, build_celestial_ephemeris(sim, opt), spacecraft_id, primary_body_id, opt, sim.config().events);
+        return predict_equatorial_nodes(
+            sim, build_celestial_ephemeris(sim, opt), spacecraft_id, primary_body_id, opt, node_opt);
     }
 
     // ---- Public API: Target Plane Nodes ----
@@ -469,7 +359,9 @@ namespace orbitsim
     inline std::vector<NodeEvent> predict_target_plane_nodes(
         const GameSimulation &sim, const CelestialEphemeris &eph,
         const SpacecraftId spacecraft_id, const SpacecraftId target_spacecraft_id,
-        const BodyId primary_body_id, const TrajectoryOptions &opt, const EventOptions &node_opt)
+        const BodyId primary_body_id,
+        const TrajectoryOptions &opt = {},
+        std::optional<EventOptions> node_opt = std::nullopt)
     {
         const Spacecraft *target_ptr = sim.spacecraft_by_id(target_spacecraft_id);
         const MassiveBody *primary_ptr = sim.body_by_id(primary_body_id);
@@ -477,6 +369,7 @@ namespace orbitsim
             return {};
 
         const double t0 = sim.time_s();
+        const auto &resolved_opt = detail::resolve_event_opt_(sim, node_opt);
         const State ps = eph.empty() ? primary_ptr->state : eph.body_state_at_by_id(primary_body_id, t0);
         const auto n = detail::orbit_plane_normal_unit_(
             target_ptr->state.position_m - ps.position_m,
@@ -485,32 +378,18 @@ namespace orbitsim
             return {};
 
         return detail::predict_plane_nodes_from_ephemeris_by_id_(
-            sim, eph, spacecraft_id, primary_body_id, *n, target_spacecraft_id, opt, node_opt);
-    }
-
-    inline std::vector<NodeEvent> predict_target_plane_nodes(
-        const GameSimulation &sim, const CelestialEphemeris &eph,
-        const SpacecraftId spacecraft_id, const SpacecraftId target_spacecraft_id,
-        const BodyId primary_body_id, const TrajectoryOptions &opt = {})
-    {
-        return predict_target_plane_nodes(sim, eph, spacecraft_id, target_spacecraft_id, primary_body_id, opt, sim.config().events);
+            sim, eph, spacecraft_id, primary_body_id, *n, target_spacecraft_id, opt, resolved_opt);
     }
 
     inline std::vector<NodeEvent> predict_target_plane_nodes(
         const GameSimulation &sim, const SpacecraftId spacecraft_id,
         const SpacecraftId target_spacecraft_id, const BodyId primary_body_id,
-        const TrajectoryOptions &opt, const EventOptions &node_opt)
+        const TrajectoryOptions &opt = {},
+        std::optional<EventOptions> node_opt = std::nullopt)
     {
         return predict_target_plane_nodes(
-            sim, build_celestial_ephemeris(sim, opt), spacecraft_id, target_spacecraft_id, primary_body_id, opt, node_opt);
-    }
-
-    inline std::vector<NodeEvent> predict_target_plane_nodes(
-        const GameSimulation &sim, const SpacecraftId spacecraft_id,
-        const SpacecraftId target_spacecraft_id, const BodyId primary_body_id, const TrajectoryOptions &opt = {})
-    {
-        return predict_target_plane_nodes(
-            sim, build_celestial_ephemeris(sim, opt), spacecraft_id, target_spacecraft_id, primary_body_id, opt, sim.config().events);
+            sim, build_celestial_ephemeris(sim, opt), spacecraft_id, target_spacecraft_id,
+            primary_body_id, opt, node_opt);
     }
 
     // ---- Public API: Maneuver Events ----

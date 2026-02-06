@@ -9,14 +9,78 @@ namespace orbitsim
 {
 
     // -------------------------------------------------------------------------
+    // RtnFrameMixin: CRTP mixin for shared rtn_* frame-selection methods
+    // -------------------------------------------------------------------------
+
+    /// @brief CRTP mixin providing RTN reference-frame setters shared by BurnBuilder and ImpulseBuilder.
+    /// Derived must have a `seg_` member with `rtn_frame` and `primary_body_id` fields.
+    template<typename Derived>
+    class RtnFrameMixin
+    {
+    public:
+        /// @brief Set the reference frame used to compute the RTN basis.
+        Derived &rtn_frame(const TrajectoryFrameSpec &frame)
+        {
+            self_().seg_.rtn_frame = frame;
+            return self_();
+        }
+
+        /// @brief Compute RTN basis in the simulation inertial frame.
+        Derived &rtn_inertial()
+        {
+            self_().seg_.rtn_frame = TrajectoryFrameSpec::inertial();
+            return self_();
+        }
+
+        /// @brief Compute RTN basis in a body-centered inertial frame (translation only; no rotation).
+        Derived &rtn_body_centered_inertial(const BodyId body_id)
+        {
+            self_().seg_.rtn_frame = TrajectoryFrameSpec::body_centered_inertial(body_id);
+            return self_();
+        }
+
+        /// @brief Compute RTN basis in a body-fixed rotating frame (ECEF-style).
+        Derived &rtn_body_fixed(const BodyId body_id)
+        {
+            self_().seg_.rtn_frame = TrajectoryFrameSpec::body_fixed(body_id);
+            return self_();
+        }
+
+        /// @brief Compute RTN basis in a two-body synodic rotating frame derived from (A,B).
+        Derived &rtn_synodic(const BodyId body_a_id, const BodyId body_b_id)
+        {
+            self_().seg_.rtn_frame = TrajectoryFrameSpec::synodic(body_a_id, body_b_id);
+            return self_();
+        }
+
+        /// @brief Compute RTN basis in LVLH frame of a target spacecraft.
+        /// @param target_sc_id Target spacecraft whose LVLH frame is used.
+        /// @param primary_body_id Primary body for RTN computation (default: auto-select).
+        Derived &rtn_lvlh(const SpacecraftId target_sc_id, const BodyId primary_body_id = kInvalidBodyId)
+        {
+            self_().seg_.rtn_frame = TrajectoryFrameSpec::lvlh(target_sc_id, primary_body_id);
+            if (primary_body_id != kInvalidBodyId)
+            {
+                self_().seg_.primary_body_id = primary_body_id;
+            }
+            return self_();
+        }
+
+    private:
+        Derived &self_() { return static_cast<Derived &>(*this); }
+    };
+
+    // -------------------------------------------------------------------------
     // BurnBuilder: fluent interface for creating BurnSegment
     // -------------------------------------------------------------------------
 
     /// @brief Fluent builder for creating BurnSegment objects.
     /// @example
     ///   auto seg = burn().start(hours(2.0)).duration(minutes(20.0)).prograde().spacecraft(sc_id);
-    class BurnBuilder
+    class BurnBuilder : public RtnFrameMixin<BurnBuilder>
     {
+        friend class RtnFrameMixin<BurnBuilder>;
+
     public:
         BurnBuilder() = default;
 
@@ -111,54 +175,6 @@ namespace orbitsim
             return *this;
         }
 
-        /// @brief Set the reference frame used to compute the RTN basis.
-        BurnBuilder &rtn_frame(const TrajectoryFrameSpec &frame)
-        {
-            seg_.rtn_frame = frame;
-            return *this;
-        }
-
-        /// @brief Compute RTN basis in the simulation inertial frame.
-        BurnBuilder &rtn_inertial()
-        {
-            seg_.rtn_frame = TrajectoryFrameSpec::inertial();
-            return *this;
-        }
-
-        /// @brief Compute RTN basis in a body-centered inertial frame (translation only; no rotation).
-        BurnBuilder &rtn_body_centered_inertial(const BodyId body_id)
-        {
-            seg_.rtn_frame = TrajectoryFrameSpec::body_centered_inertial(body_id);
-            return *this;
-        }
-
-        /// @brief Compute RTN basis in a body-fixed rotating frame (ECEF-style).
-        BurnBuilder &rtn_body_fixed(const BodyId body_id)
-        {
-            seg_.rtn_frame = TrajectoryFrameSpec::body_fixed(body_id);
-            return *this;
-        }
-
-        /// @brief Compute RTN basis in a two-body synodic rotating frame derived from (A,B).
-        BurnBuilder &rtn_synodic(const BodyId body_a_id, const BodyId body_b_id)
-        {
-            seg_.rtn_frame = TrajectoryFrameSpec::synodic(body_a_id, body_b_id);
-            return *this;
-        }
-
-        /// @brief Compute RTN basis in LVLH frame of a target spacecraft.
-        /// @param target_sc_id Target spacecraft whose LVLH frame is used.
-        /// @param primary_body_id Primary body for RTN computation (default: auto-select).
-        BurnBuilder &rtn_lvlh(const SpacecraftId target_sc_id, const BodyId primary_body_id = kInvalidBodyId)
-        {
-            seg_.rtn_frame = TrajectoryFrameSpec::lvlh(target_sc_id, primary_body_id);
-            if (primary_body_id != kInvalidBodyId)
-            {
-                seg_.primary_body_id = primary_body_id;
-            }
-            return *this;
-        }
-
         /// @brief Set the target spacecraft.
         BurnBuilder &spacecraft(const SpacecraftId spacecraft_id)
         {
@@ -193,8 +209,10 @@ namespace orbitsim
     /// @brief Fluent builder for creating ImpulseSegment objects.
     /// @example
     ///   auto imp = impulse().time(hours(1.0)).prograde(100.0).spacecraft(sc_id);
-    class ImpulseBuilder
+    class ImpulseBuilder : public RtnFrameMixin<ImpulseBuilder>
     {
+        friend class RtnFrameMixin<ImpulseBuilder>;
+
     public:
         ImpulseBuilder() = default;
 
@@ -223,54 +241,6 @@ namespace orbitsim
         ImpulseBuilder &primary(const BodyId primary_body_id)
         {
             seg_.primary_body_id = primary_body_id;
-            return *this;
-        }
-
-        /// @brief Set the reference frame used to compute the RTN basis.
-        ImpulseBuilder &rtn_frame(const TrajectoryFrameSpec &frame)
-        {
-            seg_.rtn_frame = frame;
-            return *this;
-        }
-
-        /// @brief Compute RTN basis in the simulation inertial frame.
-        ImpulseBuilder &rtn_inertial()
-        {
-            seg_.rtn_frame = TrajectoryFrameSpec::inertial();
-            return *this;
-        }
-
-        /// @brief Compute RTN basis in a body-centered inertial frame (translation only; no rotation).
-        ImpulseBuilder &rtn_body_centered_inertial(const BodyId body_id)
-        {
-            seg_.rtn_frame = TrajectoryFrameSpec::body_centered_inertial(body_id);
-            return *this;
-        }
-
-        /// @brief Compute RTN basis in a body-fixed rotating frame (ECEF-style).
-        ImpulseBuilder &rtn_body_fixed(const BodyId body_id)
-        {
-            seg_.rtn_frame = TrajectoryFrameSpec::body_fixed(body_id);
-            return *this;
-        }
-
-        /// @brief Compute RTN basis in a two-body synodic rotating frame derived from (A,B).
-        ImpulseBuilder &rtn_synodic(const BodyId body_a_id, const BodyId body_b_id)
-        {
-            seg_.rtn_frame = TrajectoryFrameSpec::synodic(body_a_id, body_b_id);
-            return *this;
-        }
-
-        /// @brief Compute RTN basis in LVLH frame of a target spacecraft.
-        /// @param target_sc_id Target spacecraft whose LVLH frame is used.
-        /// @param primary_body_id Primary body for RTN computation (default: auto-select).
-        ImpulseBuilder &rtn_lvlh(const SpacecraftId target_sc_id, const BodyId primary_body_id = kInvalidBodyId)
-        {
-            seg_.rtn_frame = TrajectoryFrameSpec::lvlh(target_sc_id, primary_body_id);
-            if (primary_body_id != kInvalidBodyId)
-            {
-                seg_.primary_body_id = primary_body_id;
-            }
             return *this;
         }
 

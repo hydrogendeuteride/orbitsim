@@ -17,23 +17,6 @@ namespace orbitsim
 
     namespace detail
     {
-        inline bool body_index_for_id_(const std::vector<MassiveBody> &bodies, const BodyId id, std::size_t *out_index)
-        {
-            if (out_index == nullptr || id == kInvalidBodyId)
-            {
-                return false;
-            }
-            for (std::size_t i = 0; i < bodies.size(); ++i)
-            {
-                if (bodies[i].id == id)
-                {
-                    *out_index = i;
-                    return true;
-                }
-            }
-            return false;
-        }
-
         template<class EphemerisLike>
         inline std::optional<RotatingFrame>
         make_rtn_reference_frame_at_(const EphemerisLike &eph, const std::vector<MassiveBody> &bodies,
@@ -45,36 +28,35 @@ namespace orbitsim
                     return RotatingFrame{};
                 case TrajectoryFrameType::BodyCenteredInertial:
                 {
-                    std::size_t idx = 0;
-                    if (!body_index_for_id_(bodies, spec.primary_body_id, &idx))
+                    const auto idx = body_index_for_id(bodies, spec.primary_body_id);
+                    if (!idx)
                     {
                         return std::nullopt;
                     }
-                    return make_body_centered_inertial_frame(eph.body_state_at(idx, t_s));
+                    return make_body_centered_inertial_frame(eph.body_state_at(*idx, t_s));
                 }
                 case TrajectoryFrameType::BodyFixed:
                 {
-                    std::size_t idx = 0;
-                    if (!body_index_for_id_(bodies, spec.primary_body_id, &idx))
+                    const auto idx = body_index_for_id(bodies, spec.primary_body_id);
+                    if (!idx)
                     {
                         return std::nullopt;
                     }
-                    return make_body_fixed_frame(eph.body_state_at(idx, t_s));
+                    return make_body_fixed_frame(eph.body_state_at(*idx, t_s));
                 }
                 case TrajectoryFrameType::Synodic:
                 {
-                    std::size_t ia = 0;
-                    std::size_t ib = 0;
-                    if (!body_index_for_id_(bodies, spec.primary_body_id, &ia) ||
-                        !body_index_for_id_(bodies, spec.secondary_body_id, &ib))
+                    const auto ia = body_index_for_id(bodies, spec.primary_body_id);
+                    const auto ib = body_index_for_id(bodies, spec.secondary_body_id);
+                    if (!ia || !ib)
                     {
                         return std::nullopt;
                     }
 
-                    const State a_state = eph.body_state_at(ia, t_s);
-                    const State b_state = eph.body_state_at(ib, t_s);
+                    const State a_state = eph.body_state_at(*ia, t_s);
+                    const State b_state = eph.body_state_at(*ib, t_s);
                     const std::optional<SynodicFrame> syn =
-                            make_synodic_frame(a_state, bodies[ia].mass_kg, b_state, bodies[ib].mass_kg);
+                            make_synodic_frame(a_state, bodies[*ia].mass_kg, b_state, bodies[*ib].mass_kg);
                     if (!syn.has_value())
                     {
                         return std::nullopt;

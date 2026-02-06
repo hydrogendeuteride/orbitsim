@@ -13,6 +13,14 @@ namespace orbitsim
     inline constexpr double kGravitationalConstant_SI = 6.67430e-11; // m^3 / (kg s^2)
     inline constexpr double kStandardGravity_mps2 = 9.80665; // m / s^2
 
+    namespace detail
+    {
+        inline bool finite3_(const Vec3 &v)
+        {
+            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+        }
+    } // namespace detail
+
     inline Vec3 normalized_or(const Vec3 &v, const Vec3 &fallback_unit)
     {
         const double len2 = glm::dot(v, v);

@@ -70,6 +70,47 @@ namespace orbitsim::detail
     }
 
     /**
+     * @brief Resolve the primary body index for a maneuver segment (burn or impulse).
+     *
+     * Checks, in order: explicit primary_body_id, LVLH frame's primary_body_id,
+     * LVLH target spacecraft's dominant body, then falls back to auto-selection.
+     *
+     * @tparam Segment BurnSegment or ImpulseSegment (must have primary_body_id, rtn_frame)
+     * @tparam AutoPrimaryFn Callable (double t_s, Vec3 pos_m) -> std::size_t
+     */
+    template<class Segment, class AutoPrimaryFn>
+    inline std::size_t resolve_primary_index(const std::vector<MassiveBody> &bodies, const Segment &seg,
+                                             const double t_s, const Vec3 &pos_m,
+                                             const SpacecraftStateLookup &sc_lookup, AutoPrimaryFn &&auto_primary_at)
+    {
+        const auto primary_opt = body_index_for_id(bodies, seg.primary_body_id);
+        if (primary_opt)
+        {
+            return *primary_opt;
+        }
+
+        if (seg.rtn_frame.type == TrajectoryFrameType::LVLH)
+        {
+            const auto frame_primary_opt = body_index_for_id(bodies, seg.rtn_frame.primary_body_id);
+            if (frame_primary_opt)
+            {
+                return *frame_primary_opt;
+            }
+
+            if (sc_lookup)
+            {
+                const std::optional<State> target_state = sc_lookup(seg.rtn_frame.target_spacecraft_id, t_s);
+                if (target_state.has_value())
+                {
+                    return auto_primary_at(t_s, target_state->position_m);
+                }
+            }
+        }
+
+        return auto_primary_at(t_s, pos_m);
+    }
+
+    /**
      * @brief Propagate a spacecraft through a precomputed ephemeris segment.
      *
      * Integrates spacecraft motion under:
@@ -129,84 +170,13 @@ namespace orbitsim::detail
         const SpacecraftId spacecraft_id = sc0.id;
         SpacecraftKinematics y{out.state.position_m, out.state.velocity_mps};
 
-        auto body_index_for_id = [&](const BodyId id, std::size_t *out_index) -> bool {
-            if (out_index == nullptr)
-            {
-                return false;
-            }
-            *out_index = 0;
-            if (id == kInvalidBodyId)
-            {
-                return false;
-            }
-            for (std::size_t i = 0; i < bodies.size(); ++i)
-            {
-                if (bodies[i].id == id)
-                {
-                    *out_index = i;
-                    return true;
-                }
-            }
-            return false;
-        };
-
         auto auto_primary_at = [&](const double t_s, const Vec3 &pos_m) -> std::size_t {
             return auto_select_primary_index(
                     bodies, pos_m, [&](std::size_t i) { return eph.body_position_at(i, t_s); }, softening_length_m);
         };
 
-        auto primary_for = [&](const BurnSegment &seg, const double t_s, const Vec3 &pos_m) -> std::size_t {
-            std::size_t primary_index = 0;
-            if (body_index_for_id(seg.primary_body_id, &primary_index))
-            {
-                return primary_index;
-            }
-
-            if (seg.rtn_frame.type == TrajectoryFrameType::LVLH)
-            {
-                if (body_index_for_id(seg.rtn_frame.primary_body_id, &primary_index))
-                {
-                    return primary_index;
-                }
-
-                if (sc_lookup)
-                {
-                    const std::optional<State> target_state = sc_lookup(seg.rtn_frame.target_spacecraft_id, t_s);
-                    if (target_state.has_value())
-                    {
-                        return auto_primary_at(t_s, target_state->position_m);
-                    }
-                }
-            }
-
-            return auto_primary_at(t_s, pos_m);
-        };
-
-        auto primary_for_impulse = [&](const ImpulseSegment &seg, const double t_s, const Vec3 &pos_m) -> std::size_t {
-            std::size_t primary_index = 0;
-            if (body_index_for_id(seg.primary_body_id, &primary_index))
-            {
-                return primary_index;
-            }
-
-            if (seg.rtn_frame.type == TrajectoryFrameType::LVLH)
-            {
-                if (body_index_for_id(seg.rtn_frame.primary_body_id, &primary_index))
-                {
-                    return primary_index;
-                }
-
-                if (sc_lookup)
-                {
-                    const std::optional<State> target_state = sc_lookup(seg.rtn_frame.target_spacecraft_id, t_s);
-                    if (target_state.has_value())
-                    {
-                        return auto_primary_at(t_s, target_state->position_m);
-                    }
-                }
-            }
-
-            return auto_primary_at(t_s, pos_m);
+        auto resolve_primary = [&](const auto &seg, const double t_s, const Vec3 &pos_m) -> std::size_t {
+            return resolve_primary_index(bodies, seg, t_s, pos_m, sc_lookup, auto_primary_at);
         };
 
         auto apply_impulses_at = [&](const double t_s, const Vec3 &pos_m, const Vec3 &vel_mps) -> Vec3 {
@@ -233,7 +203,7 @@ namespace orbitsim::detail
                 {
                     continue;
                 }
-                const std::size_t primary = primary_for_impulse(imp, t_s, pos_m);
+                const std::size_t primary = resolve_primary(imp, t_s, pos_m);
                 dv_i += rtn_vector_to_inertial(eph, bodies, primary, t_s, pos_m, vel_mps, imp.dv_rtn_mps, imp.rtn_frame, sc_lookup);
             }
             return dv_i;
@@ -284,7 +254,7 @@ namespace orbitsim::detail
 
             const double t_segment_start = t;
             const double prop_start_kg = out.prop_mass_kg;
-            const std::size_t primary = (seg != nullptr) ? primary_for(*seg, t, y.position_m) : 0;
+            const std::size_t primary = (seg != nullptr) ? resolve_primary(*seg, t, y.position_m) : 0;
             const Vec3 dir_rtn = (seg != nullptr) ? seg->dir_rtn_unit : Vec3{0.0, 0.0, 0.0};
             const TrajectoryFrameSpec rtn_frame = (seg != nullptr) ? seg->rtn_frame : TrajectoryFrameSpec{};
 

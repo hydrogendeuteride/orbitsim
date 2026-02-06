@@ -35,28 +35,6 @@ namespace orbitsim
 
     namespace detail
     {
-        inline bool finite3_(const Vec3 &v)
-        {
-            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
-        }
-
-        /// @brief Find the index of a body by id (returns nullopt if not found/invalid).
-        inline std::optional<std::size_t> body_index_for_id_(const std::vector<MassiveBody> &bodies, const BodyId id)
-        {
-            if (id == kInvalidBodyId)
-            {
-                return std::nullopt;
-            }
-            for (std::size_t i = 0; i < bodies.size(); ++i)
-            {
-                if (bodies[i].id == id)
-                {
-                    return i;
-                }
-            }
-            return std::nullopt;
-        }
-
         template<class EphemerisLike, class Propagator>
         /**
          * @brief Find the earliest plane-node crossing in `[t0_s, t0_s + dt_s]` using bisection on signed distance.
@@ -106,7 +84,7 @@ namespace orbitsim
                 return std::nullopt;
             }
 
-            const std::optional<std::size_t> primary_index_opt = body_index_for_id_(bodies, primary_body_id);
+            const std::optional<std::size_t> primary_index_opt = body_index_for_id(bodies, primary_body_id);
             if (!primary_index_opt.has_value())
             {
                 return std::nullopt;

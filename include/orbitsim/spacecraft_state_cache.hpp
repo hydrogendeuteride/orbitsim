@@ -121,28 +121,6 @@ namespace orbitsim
             std::vector<Segment> segments{};
         };
 
-        bool body_index_for_id_(const BodyId body_id, std::size_t *out_index) const
-        {
-            if (out_index == nullptr)
-            {
-                return false;
-            }
-            *out_index = 0;
-            if (body_id == kInvalidBodyId)
-            {
-                return false;
-            }
-            for (std::size_t i = 0; i < bodies_.size(); ++i)
-            {
-                if (bodies_[i].id == body_id)
-                {
-                    *out_index = i;
-                    return true;
-                }
-            }
-            return false;
-        }
-
         std::size_t auto_primary_at_(const double t_s, const Vec3 &pos_m) const
         {
             return auto_select_primary_index(
@@ -153,27 +131,8 @@ namespace orbitsim
         std::size_t primary_for_impulse_(const ImpulseSegment &seg, const double t_s, const Vec3 &pos_m,
                                          const SpacecraftStateLookup &sc_lookup) const
         {
-            std::size_t primary_index = 0;
-            if (body_index_for_id_(seg.primary_body_id, &primary_index))
-            {
-                return primary_index;
-            }
-
-            if (seg.rtn_frame.type == TrajectoryFrameType::LVLH)
-            {
-                if (body_index_for_id_(seg.rtn_frame.primary_body_id, &primary_index))
-                {
-                    return primary_index;
-                }
-
-                const std::optional<State> target_state = sc_lookup(seg.rtn_frame.target_spacecraft_id, t_s);
-                if (target_state.has_value())
-                {
-                    return auto_primary_at_(t_s, target_state->position_m);
-                }
-            }
-
-            return auto_primary_at_(t_s, pos_m);
+            return detail::resolve_primary_index(bodies_, seg, t_s, pos_m, sc_lookup,
+                    [this](const double t, const Vec3 &p) { return auto_primary_at_(t, p); });
         }
 
         Vec3 impulse_dv_inertial_at_(const SpacecraftId id, const double t_s, const Vec3 &pos_m, const Vec3 &vel_mps,

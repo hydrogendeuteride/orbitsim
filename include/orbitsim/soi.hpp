@@ -36,7 +36,7 @@ namespace orbitsim
 
     namespace soi_detail
     {
-        inline bool finite3_(const Vec3 &v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+        using detail::finite3_;
 
         inline bool near_equal_(const double a, const double b, const double rel_tol = 1e-12,
                                 const double abs_tol = 1e-12)

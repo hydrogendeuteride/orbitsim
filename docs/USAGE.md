@@ -96,6 +96,16 @@ earth.state = make_state(
 );
 ```
 
+```c++
+// Utility: lookup a body index by BodyId from a body array.
+earth.id = 1;
+std::vector<MassiveBody> bodies{earth};
+const auto earth_idx = body_index_for_id(bodies, earth.id);
+if (earth_idx) {
+    const MassiveBody& earth_body = bodies[*earth_idx];
+}
+```
+
 ### Engine
 
 ```c++
@@ -191,12 +201,15 @@ ok = sim.set_spacecraft_state(ship_id, new_ship_state);
 ### Running the Simulation
 
 ```c++
-// Simple step (no events)
+// Step without collecting events
 sim.step(10.0);  // Advance 10 seconds
 
 // Collect events
 std::vector<Event> events;
 sim.step(10.0, &events);
+
+// Backward integration (event subdivision is not applied)
+sim.step(-10.0);
 
 // Handle events
 for (const Event& e : events) {
@@ -374,6 +387,7 @@ auto braking = impulse()
 **LVLH Frame Characteristics:**
 - RTN basis computed from target spacecraft's position/velocity relative to primary body
 - Target's state is evaluated in real-time during burns
+- Primary selection order for LVLH maneuvers: segment `primary_body_id` -> LVLH frame `primary_body_id` -> auto-select from target/body states
 - If target `spacecraft_id` is invalid, the maneuver has no effect (returns zero vector)
 
 ---
@@ -404,6 +418,23 @@ opt.time_tol_s = 1e-3;             // Time tolerance
 opt.dist_tol_m = 1e-2;             // Distance tolerance
 opt.max_bisect_iters = 64;         // Maximum bisection iterations
 opt.max_event_splits_per_step = 8; // Maximum splits per step
+```
+
+Trajectory prediction event APIs accept an optional per-call override:
+
+```c++
+EventOptions tighter = sim.config().events;
+tighter.time_tol_s = 1e-4;
+tighter.dist_tol_m = 1e-3;
+
+// Override for this call only
+auto sc_events = predict_spacecraft_events(sim, eph, ship_id, opts, tighter);
+auto eq_nodes  = predict_equatorial_nodes(sim, eph, ship_id, earth_id, opts, tighter);
+auto tg_nodes  = predict_target_plane_nodes(sim, eph, ship_id, target_id, earth_id, opts, tighter);
+auto apsides   = predict_apsis_events(sim, eph, ship_id, earth_id, opts, tighter);
+
+// Explicitly use sim.config().events defaults
+auto sc_events_default = predict_spacecraft_events(sim, eph, ship_id, opts, std::nullopt);
 ```
 
 ### Proximity Event Configuration
@@ -932,7 +963,7 @@ int main() {
 
 | Header | Key Features |
 |--------|--------------|
-| `types.hpp` | Basic types (Vec3, State, MassiveBody, Spacecraft) |
+| `types.hpp` | Basic types (Vec3, State, MassiveBody, Spacecraft), `body_index_for_id` helper |
 | `game_sim.hpp` | GameSimulation class |
 | `maneuvers.hpp` | BurnSegment, ImpulseSegment, ManeuverPlan, LVLH frame |
 | `frame_spec.hpp` | TrajectoryFrameSpec (Inertial, BCI, BodyFixed, Synodic, LVLH) |

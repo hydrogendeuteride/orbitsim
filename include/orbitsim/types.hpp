@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace orbitsim
@@ -91,6 +92,23 @@ namespace orbitsim
         return State{.position_m = position_m,
                      .velocity_mps = velocity_mps,
                      .spin = make_spin(spin_axis, spin_rate_rad_per_s, spin_angle_rad)};
+    }
+
+    /// @brief Find the index of a body by id (returns nullopt if not found/invalid).
+    inline std::optional<std::size_t> body_index_for_id(const std::vector<MassiveBody> &bodies, const BodyId id)
+    {
+        if (id == kInvalidBodyId)
+        {
+            return std::nullopt;
+        }
+        for (std::size_t i = 0; i < bodies.size(); ++i)
+        {
+            if (bodies[i].id == id)
+            {
+                return i;
+            }
+        }
+        return std::nullopt;
     }
 
 } // namespace orbitsim
