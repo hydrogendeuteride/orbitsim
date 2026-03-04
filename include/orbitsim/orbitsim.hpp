@@ -17,6 +17,7 @@
 #include "orbitsim/spacecraft_lookup.hpp"
 #include "orbitsim/spacecraft_state_cache.hpp"
 #include "orbitsim/time_utils.hpp"
+#include "orbitsim/trajectory_segments.hpp"
 #include "orbitsim/trajectories.hpp"
 #include "orbitsim/trajectory_events.hpp"
 #include "orbitsim/trajectory_transforms.hpp"

@@ -56,6 +56,112 @@ TEST(Trajectories, PredictSpacecraftTrajectoryLinearMotion)
     EXPECT_TRUE(near_vec_abs(traj.back().velocity_mps, orbitsim::Vec3{0.5, 0.0, 0.0}, 1e-9));
 }
 
+TEST(Trajectories, PredictSpacecraftTrajectorySegmentsLinearMotion)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const orbitsim::GameSimulation::BodyHandle origin_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 0.0,
+            .radius_m = 1.0,
+            .state =
+                    {
+                            .position_m = {100.0, 0.0, 0.0},
+                            .velocity_mps = {0.5, 0.0, 0.0},
+                    },
+    });
+    ASSERT_TRUE(origin_h.valid());
+
+    orbitsim::Spacecraft sc{};
+    sc.state.position_m = {110.0, 0.0, 0.0};
+    sc.state.velocity_mps = {1.0, 0.0, 0.0};
+    sc.dry_mass_kg = 1.0;
+    sc.prop_mass_kg = 0.0;
+    const orbitsim::GameSimulation::SpacecraftHandle sc_h = sim.create_spacecraft(sc);
+    ASSERT_TRUE(sc_h.valid());
+
+    orbitsim::TrajectorySegmentOptions seg_opt{};
+    seg_opt.duration_s = 10.0;
+    seg_opt.max_segments = 16;
+    seg_opt.lookup_dt_s = 1.0;
+    seg_opt.include_start = true;
+    seg_opt.include_end = true;
+
+    const std::vector<orbitsim::TrajectorySegment> segments =
+            orbitsim::predict_spacecraft_trajectory_segments(sim, sc_h.id, seg_opt);
+    ASSERT_EQ(segments.size(), 10u);
+
+    EXPECT_TRUE(near_abs(segments.front().t0_s, 0.0, 1e-12));
+    EXPECT_TRUE(near_abs(segments.front().dt_s, 1.0, 1e-12));
+    EXPECT_TRUE(near_vec_abs(segments.front().start.position_m, orbitsim::Vec3{110.0, 0.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(segments.front().end.position_m, orbitsim::Vec3{111.0, 0.0, 0.0}, 1e-9));
+
+    EXPECT_TRUE(near_abs(segments.back().t0_s, 9.0, 1e-12));
+    EXPECT_TRUE(near_abs(segments.back().dt_s, 1.0, 1e-12));
+    EXPECT_TRUE(near_vec_abs(segments.back().start.position_m, orbitsim::Vec3{119.0, 0.0, 0.0}, 1e-9));
+    EXPECT_TRUE(near_vec_abs(segments.back().end.position_m, orbitsim::Vec3{120.0, 0.0, 0.0}, 1e-9));
+
+    const std::vector<orbitsim::TrajectorySample> sampled =
+            orbitsim::sample_trajectory_segments_uniform_dt(segments, 1.0, 64, true, true);
+    ASSERT_EQ(sampled.size(), 11u);
+    EXPECT_TRUE(near_abs(sampled.front().t_s, 0.0, 1e-12));
+    EXPECT_TRUE(near_abs(sampled.back().t_s, 10.0, 1e-12));
+    EXPECT_TRUE(near_vec_abs(sampled.front().position_m, orbitsim::Vec3{110.0, 0.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(sampled.back().position_m, orbitsim::Vec3{120.0, 0.0, 0.0}, 1e-9));
+}
+
+TEST(Trajectories, PredictSpacecraftTrajectorySegmentsStopOnImpact)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.events.time_tol_s = 1e-6;
+    cfg.events.dist_tol_m = 1e-6;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const orbitsim::GameSimulation::BodyHandle body_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 0.0,
+            .radius_m = 1.0,
+            .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+    });
+    ASSERT_TRUE(body_h.valid());
+
+    const orbitsim::GameSimulation::SpacecraftHandle sc_h = sim.create_spacecraft(orbitsim::Spacecraft{
+            .state = orbitsim::make_state({2.0, 0.0, 0.0}, {-1.0, 0.0, 0.0}),
+            .dry_mass_kg = 1.0,
+            .prop_mass_kg = 0.0,
+    });
+    ASSERT_TRUE(sc_h.valid());
+
+    orbitsim::TrajectoryOptions eph_opt{};
+    eph_opt.duration_s = 5.0;
+    eph_opt.sample_dt_s = 1.0;
+    eph_opt.celestial_dt_s = 1.0;
+    eph_opt.max_samples = 64;
+    const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris(sim, eph_opt);
+
+    orbitsim::TrajectorySegmentOptions seg_opt{};
+    seg_opt.duration_s = 5.0;
+    seg_opt.max_segments = 64;
+    seg_opt.lookup_dt_s = 1.0;
+    seg_opt.stop_on_impact = true;
+
+    const std::vector<orbitsim::TrajectorySegment> segments =
+            orbitsim::predict_spacecraft_trajectory_segments(sim, eph, sc_h.id, seg_opt);
+    ASSERT_FALSE(segments.empty());
+    EXPECT_TRUE(near_abs(segments.front().t0_s, 0.0, 1e-12));
+    EXPECT_TRUE(near_abs(segments.back().t0_s + segments.back().dt_s, 1.0, 1e-3));
+    EXPECT_TRUE(near_vec_abs(segments.back().end.position_m, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-3));
+}
+
 TEST(Trajectories, CelestialEphemerisLinearInterpolationAndClamp)
 {
     orbitsim::GameSimulation::Config cfg{};
@@ -234,4 +340,3 @@ TEST(Trajectories, PredictSpacecraftEventsFindsImpact)
     EXPECT_EQ(events.front().crossing, orbitsim::Crossing::Enter);
     EXPECT_TRUE(near_abs(events.front().t_event_s, 1.0, 1e-3));
 }
-
