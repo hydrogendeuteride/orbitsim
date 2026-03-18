@@ -290,7 +290,49 @@ namespace orbitsim::detail
                 return a;
             };
 
-            y = dopri5_integrate_interval(t, y, h, accel, spacecraft_integrator);
+            const int soft_substeps = std::max(1, spacecraft_integrator.max_substeps);
+            const int hard_substeps = std::max(soft_substeps, spacecraft_integrator.max_substeps_hard);
+            const int max_split_depth = std::max(0, spacecraft_integrator.max_interval_splits);
+            const auto integrate_segment = [&](auto &&self,
+                                              const double t_interval_s,
+                                              const SpacecraftKinematics &y_interval,
+                                              const double interval_dt_s,
+                                              const int split_depth,
+                                              const int substep_cap) -> SpacecraftKinematics {
+                DOPRI5Options retry_integrator = spacecraft_integrator;
+                retry_integrator.max_substeps = std::max(1, substep_cap);
+
+                const DOPRI5IntervalResult result =
+                        dopri5_integrate_interval_with_stats(t_interval_s, y_interval, interval_dt_s, accel, retry_integrator);
+                if (!result.stats.hit_max_substeps)
+                {
+                    return result.state;
+                }
+
+                const double abs_interval_dt_s = std::abs(interval_dt_s);
+                if (split_depth < max_split_depth && abs_interval_dt_s > (retry_integrator.min_step_s * 2.0))
+                {
+                    const double half_dt_s = interval_dt_s * 0.5;
+                    const SpacecraftKinematics mid_state =
+                            self(self, t_interval_s, y_interval, half_dt_s, split_depth + 1, soft_substeps);
+                    return self(self,
+                                t_interval_s + half_dt_s,
+                                mid_state,
+                                interval_dt_s - half_dt_s,
+                                split_depth + 1,
+                                soft_substeps);
+                }
+
+                if (substep_cap < hard_substeps)
+                {
+                    const int next_substep_cap = std::min(hard_substeps, std::max(substep_cap + 1, substep_cap * 2));
+                    return self(self, t_interval_s, y_interval, interval_dt_s, split_depth, next_substep_cap);
+                }
+
+                return result.state;
+            };
+
+            y = integrate_segment(integrate_segment, t, y, h, 0, soft_substeps);
 
             if (mdot_kgps > 0.0)
             {

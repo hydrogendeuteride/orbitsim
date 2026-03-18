@@ -120,7 +120,9 @@ namespace orbitsim
         bool adaptive{true}; ///< Enable adaptive step size control
         double abs_tol{1e-3}; ///< Absolute tolerance (meters or m/s)
         double rel_tol{1e-9}; ///< Relative tolerance
-        int max_substeps{64}; ///< Max substeps before forcing completion
+        int max_substeps{64}; ///< Initial substep cap before the caller retries with splits or a higher cap
+        int max_substeps_hard{256}; ///< Hard ceiling when retries escalate the substep budget
+        int max_interval_splits{8}; ///< Max recursive interval halvings after hitting the soft cap
         double max_step_s{0.0}; ///< Max step size (0 = unlimited)
         double min_step_s{1e-6}; ///< Min step size for step rejection
     };
@@ -130,6 +132,21 @@ namespace orbitsim
     {
         Vec3 position_m{0.0, 0.0, 0.0};
         Vec3 velocity_mps{0.0, 0.0, 0.0};
+    };
+
+    /** @brief Integration diagnostics for a single DOPRI5 interval solve. */
+    struct DOPRI5IntervalStats
+    {
+        int substeps_used{0};
+        int rejected_steps{0};
+        bool hit_max_substeps{false};
+    };
+
+    /** @brief Result bundle for interval integration plus diagnostics. */
+    struct DOPRI5IntervalResult
+    {
+        SpacecraftKinematics state{};
+        DOPRI5IntervalStats stats{};
     };
 
     /**
@@ -267,16 +284,18 @@ namespace orbitsim
      * @param dt_s Integration interval (positive = forward, negative = backward)
      * @param accel_mps2 Acceleration function: f(t, pos, vel) -> acceleration
      * @param opt Integration options (tolerances, step limits)
-     * @return Final state at t0_s + dt_s
+     * @return Final state at t0_s + dt_s plus interval diagnostics
      */
-    inline SpacecraftKinematics dopri5_integrate_interval(
+    inline DOPRI5IntervalResult dopri5_integrate_interval_with_stats(
             const double t0_s, const SpacecraftKinematics &y0, const double dt_s,
             const std::function<Vec3(double /*t_s*/, const Vec3 & /*pos_m*/, const Vec3 & /*vel_mps*/)> &accel_mps2,
             const DOPRI5Options &opt)
     {
+        DOPRI5IntervalResult result{};
+        result.state = y0;
         if (!(dt_s != 0.0) || !std::isfinite(dt_s))
         {
-            return y0;
+            return result;
         }
 
         const double dir = (dt_s > 0.0) ? 1.0 : -1.0;
@@ -303,7 +322,8 @@ namespace orbitsim
             const double abs_dt = std::abs(dt_s);
             if (abs_dt <= opt.min_step_s)
             {
-                return dopri5_single_step(t0_s, y0, dt_s, accel_mps2, nullptr);
+                result.state = dopri5_single_step(t0_s, y0, dt_s, accel_mps2, nullptr);
+                return result;
             }
             h = abs_dt * dir;
         }
@@ -316,10 +336,16 @@ namespace orbitsim
         int substeps = 0;
         while ((dir > 0.0) ? (t < t_end) : (t > t_end))
         {
-            if (++substeps > std::max(1, opt.max_substeps))
+            if (substeps >= std::max(1, opt.max_substeps))
             {
-                return dopri5_single_step(t, y, t_end - t, accel_mps2, nullptr);
+                result.stats.substeps_used = substeps;
+                result.stats.hit_max_substeps = true;
+                result.state = dopri5_single_step(t, y, t_end - t, accel_mps2, nullptr);
+                return result;
             }
+
+            ++substeps;
+            result.stats.substeps_used = substeps;
             const double remaining = t_end - t;
             if (std::abs(h) > std::abs(remaining))
             {
@@ -356,6 +382,7 @@ namespace orbitsim
             }
             else
             {
+                ++result.stats.rejected_steps;
                 const double fac = std::clamp(safety * std::pow(err_norm, -0.2), min_fac, 1.0);
                 h *= fac;
                 h = clamp_h(h);
@@ -366,7 +393,22 @@ namespace orbitsim
             }
         }
 
-        return y;
+        result.state = y;
+        return result;
+    }
+
+    /**
+     * @brief Backward-compatible DOPRI5 interval integration helper.
+     *
+     * Use dopri5_integrate_interval_with_stats() when the caller needs to react to
+     * substep pressure or inspect rejection counts.
+     */
+    inline SpacecraftKinematics dopri5_integrate_interval(
+            const double t0_s, const SpacecraftKinematics &y0, const double dt_s,
+            const std::function<Vec3(double /*t_s*/, const Vec3 & /*pos_m*/, const Vec3 & /*vel_mps*/)> &accel_mps2,
+            const DOPRI5Options &opt)
+    {
+        return dopri5_integrate_interval_with_stats(t0_s, y0, dt_s, accel_mps2, opt).state;
     }
 
 } // namespace orbitsim
