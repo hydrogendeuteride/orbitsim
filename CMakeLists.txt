@@ -3,14 +3,32 @@ project(orbitsim LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 
+if (TARGET glm::glm)
+    set(ORBITSIM_GLM_TARGET glm::glm)
+elseif (TARGET glm)
+    set(ORBITSIM_GLM_TARGET glm)
+elseif (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../glm/CMakeLists.txt")
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../glm" "${CMAKE_CURRENT_BINARY_DIR}/glm" EXCLUDE_FROM_ALL)
+    if (TARGET glm::glm)
+        set(ORBITSIM_GLM_TARGET glm::glm)
+    elseif (TARGET glm)
+        set(ORBITSIM_GLM_TARGET glm)
+    endif ()
+else ()
+    find_package(glm CONFIG REQUIRED)
+    set(ORBITSIM_GLM_TARGET glm::glm)
+endif ()
+
 add_library(orbitsim INTERFACE
         include/orbitsim/lambert.hpp)
 target_include_directories(orbitsim
         INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glm
 )
 target_compile_features(orbitsim INTERFACE cxx_std_20)
+if (ORBITSIM_GLM_TARGET)
+    target_link_libraries(orbitsim INTERFACE ${ORBITSIM_GLM_TARGET})
+endif ()
 
 add_executable(orbitsim_example main.cpp)
 target_link_libraries(orbitsim_example PRIVATE orbitsim)

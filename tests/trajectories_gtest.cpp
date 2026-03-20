@@ -115,6 +115,124 @@ TEST(Trajectories, PredictSpacecraftTrajectorySegmentsLinearMotion)
     EXPECT_TRUE(near_vec_abs(sampled.back().position_m, orbitsim::Vec3{120.0, 0.0, 0.0}, 1e-9));
 }
 
+TEST(Trajectories, AdaptiveSegmentsLinearMotionUsesSingleSegment)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const orbitsim::GameSimulation::BodyHandle origin_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 0.0,
+            .radius_m = 1.0,
+            .state = orbitsim::make_state({100.0, 0.0, 0.0}, {0.5, 0.0, 0.0}),
+    });
+    ASSERT_TRUE(origin_h.valid());
+
+    orbitsim::Spacecraft sc{};
+    sc.state.position_m = {110.0, 0.0, 0.0};
+    sc.state.velocity_mps = {1.0, 0.0, 0.0};
+    sc.dry_mass_kg = 1.0;
+    const auto sc_h = sim.create_spacecraft(sc);
+    ASSERT_TRUE(sc_h.valid());
+
+    orbitsim::AdaptiveEphemerisOptions eph_opt{};
+    eph_opt.duration_s = 10.0;
+    eph_opt.min_dt_s = 0.25;
+    eph_opt.max_dt_s = 10.0;
+    eph_opt.soft_max_segments = 8;
+    eph_opt.hard_max_segments = 32;
+
+    orbitsim::AdaptiveEphemerisDiagnostics eph_diag{};
+    const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris_adaptive(sim, eph_opt, &eph_diag);
+    ASSERT_FALSE(eph.empty());
+    EXPECT_EQ(eph_diag.accepted_segments, 1u);
+
+    orbitsim::AdaptiveSegmentOptions seg_opt{};
+    seg_opt.duration_s = 10.0;
+    seg_opt.min_dt_s = 0.25;
+    seg_opt.max_dt_s = 10.0;
+    seg_opt.lookup_max_dt_s = 1.0;
+    seg_opt.soft_max_segments = 8;
+    seg_opt.hard_max_segments = 32;
+
+    orbitsim::AdaptiveSegmentDiagnostics seg_diag{};
+    const std::vector<orbitsim::TrajectorySegment> segments =
+            orbitsim::predict_spacecraft_trajectory_segments_adaptive(sim, eph, sc_h.id, seg_opt, &seg_diag);
+    ASSERT_EQ(segments.size(), 1u);
+    EXPECT_EQ(seg_diag.accepted_segments, 1u);
+    EXPECT_TRUE(near_abs(segments.front().t0_s, 0.0, 1e-12));
+    EXPECT_TRUE(near_abs(segments.front().dt_s, 10.0, 1e-12));
+    EXPECT_TRUE(near_vec_abs(segments.front().start.position_m, orbitsim::Vec3{110.0, 0.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(segments.front().end.position_m, orbitsim::Vec3{120.0, 0.0, 0.0}, 1e-9));
+}
+
+TEST(Trajectories, AdaptiveSegmentsSplitAtImpulseBoundary)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const auto body_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 0.0,
+            .radius_m = 1.0,
+            .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+    });
+    ASSERT_TRUE(body_h.valid());
+
+    const auto sc_h = sim.create_spacecraft(orbitsim::Spacecraft{
+            .state = orbitsim::make_state({10.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+            .dry_mass_kg = 1.0,
+            .prop_mass_kg = 0.0,
+    });
+    ASSERT_TRUE(sc_h.valid());
+
+    sim.maneuver_plan().impulses.push_back(orbitsim::ImpulseSegment{
+            .t_s = 5.0,
+            .primary_body_id = body_h.id,
+            .dv_rtn_mps = {0.0, 1.0, 0.0},
+            .spacecraft_id = sc_h.id,
+    });
+    orbitsim::sort_impulses_by_time(sim.maneuver_plan());
+
+    orbitsim::AdaptiveEphemerisOptions eph_opt{};
+    eph_opt.duration_s = 10.0;
+    eph_opt.min_dt_s = 0.25;
+    eph_opt.max_dt_s = 10.0;
+    const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris_adaptive(sim, eph_opt);
+
+    orbitsim::AdaptiveSegmentOptions seg_opt{};
+    seg_opt.duration_s = 10.0;
+    seg_opt.min_dt_s = 0.25;
+    seg_opt.max_dt_s = 10.0;
+    seg_opt.lookup_max_dt_s = 1.0;
+
+    orbitsim::AdaptiveSegmentDiagnostics diag{};
+    const std::vector<orbitsim::TrajectorySegment> segments =
+            orbitsim::predict_spacecraft_trajectory_segments_adaptive(sim, eph, sc_h.id, seg_opt, &diag);
+    ASSERT_EQ(segments.size(), 2u);
+    EXPECT_EQ(diag.forced_boundary_splits, 1u);
+
+    EXPECT_TRUE(near_abs(segments[0].t0_s, 0.0, 1e-12));
+    EXPECT_TRUE(near_abs(segments[0].dt_s, 5.0, 1e-12));
+    EXPECT_EQ(segments[0].flags, 0u);
+    EXPECT_TRUE(near_vec_abs(segments[0].end.position_m, orbitsim::Vec3{10.0, 0.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(segments[0].end.velocity_mps, orbitsim::Vec3{0.0, 0.0, 0.0}, 1e-12));
+
+    EXPECT_TRUE(near_abs(segments[1].t0_s, 5.0, 1e-12));
+    EXPECT_TRUE((segments[1].flags & orbitsim::kTrajectorySegmentFlagImpulseBoundary) != 0u);
+    EXPECT_TRUE(near_vec_abs(segments[1].start.position_m, orbitsim::Vec3{10.0, 0.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(segments[1].start.velocity_mps, orbitsim::Vec3{0.0, 1.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(segments[1].end.position_m, orbitsim::Vec3{10.0, 5.0, 0.0}, 1e-9));
+}
+
 TEST(Trajectories, PredictSpacecraftTrajectorySegmentsStopOnImpact)
 {
     orbitsim::GameSimulation::Config cfg{};
@@ -160,6 +278,88 @@ TEST(Trajectories, PredictSpacecraftTrajectorySegmentsStopOnImpact)
     EXPECT_TRUE(near_abs(segments.front().t0_s, 0.0, 1e-12));
     EXPECT_TRUE(near_abs(segments.back().t0_s + segments.back().dt_s, 1.0, 1e-3));
     EXPECT_TRUE(near_vec_abs(segments.back().end.position_m, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-3));
+}
+
+TEST(Trajectories, AdaptiveSegmentsStopOnImpactMarksTerminalSegment)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+    cfg.events.time_tol_s = 1e-6;
+    cfg.events.dist_tol_m = 1e-6;
+    cfg.spacecraft_integrator.adaptive = true;
+    cfg.spacecraft_integrator.max_substeps = 256;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const auto body_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 0.0,
+            .radius_m = 1.0,
+            .state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+    });
+    ASSERT_TRUE(body_h.valid());
+
+    const auto sc_h = sim.create_spacecraft(orbitsim::Spacecraft{
+            .state = orbitsim::make_state({2.0, 0.0, 0.0}, {-1.0, 0.0, 0.0}),
+            .dry_mass_kg = 1.0,
+            .prop_mass_kg = 0.0,
+    });
+    ASSERT_TRUE(sc_h.valid());
+
+    orbitsim::AdaptiveEphemerisOptions eph_opt{};
+    eph_opt.duration_s = 5.0;
+    eph_opt.min_dt_s = 0.25;
+    eph_opt.max_dt_s = 5.0;
+    const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris_adaptive(sim, eph_opt);
+
+    orbitsim::AdaptiveSegmentOptions seg_opt{};
+    seg_opt.duration_s = 5.0;
+    seg_opt.min_dt_s = 0.25;
+    seg_opt.max_dt_s = 0.5;
+    seg_opt.lookup_max_dt_s = 1.0;
+    seg_opt.stop_on_impact = true;
+
+    const std::vector<orbitsim::TrajectorySegment> segments =
+            orbitsim::predict_spacecraft_trajectory_segments_adaptive(sim, eph, sc_h.id, seg_opt);
+    ASSERT_FALSE(segments.empty());
+    EXPECT_TRUE((segments.back().flags & orbitsim::kTrajectorySegmentFlagImpactTerminal) != 0u);
+    EXPECT_TRUE(near_abs(segments.back().t0_s + segments.back().dt_s, 1.0, 1e-3));
+    EXPECT_TRUE(near_vec_abs(segments.back().end.position_m, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-3));
+}
+
+TEST(Trajectories, AdaptiveEphemerisLinearInterpolationAndClamp)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    const auto moving_h = sim.create_body(orbitsim::MassiveBody{
+            .mass_kg = 1.0,
+            .radius_m = 1.0,
+            .state = orbitsim::make_state({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}),
+    });
+    ASSERT_TRUE(moving_h.valid());
+
+    orbitsim::AdaptiveEphemerisOptions opt{};
+    opt.duration_s = 4.0;
+    opt.min_dt_s = 0.25;
+    opt.max_dt_s = 4.0;
+
+    orbitsim::AdaptiveEphemerisDiagnostics diag{};
+    const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris_adaptive(sim, opt, &diag);
+    ASSERT_FALSE(eph.empty());
+    ASSERT_EQ(eph.segments.size(), 1u);
+    EXPECT_EQ(diag.accepted_segments, 1u);
+
+    const orbitsim::State s_t2 = eph.body_state_at_by_id(moving_h.id, 2.0);
+    EXPECT_TRUE(near_vec_abs(s_t2.position_m, orbitsim::Vec3{2.0, 0.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(s_t2.velocity_mps, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-12));
+
+    const orbitsim::State s_after = eph.body_state_at_by_id(moving_h.id, 10.0);
+    EXPECT_TRUE(near_vec_abs(s_after.position_m, orbitsim::Vec3{4.0, 0.0, 0.0}, 1e-12));
+    EXPECT_TRUE(near_vec_abs(s_after.velocity_mps, orbitsim::Vec3{1.0, 0.0, 0.0}, 1e-12));
 }
 
 TEST(Trajectories, CelestialEphemerisLinearInterpolationAndClamp)

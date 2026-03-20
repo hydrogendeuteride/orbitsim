@@ -4,14 +4,343 @@
 #include "orbitsim/frame_spec.hpp"
 #include "orbitsim/spacecraft_lookup.hpp"
 #include "orbitsim/synodic.hpp"
+#include "orbitsim/trajectories.hpp"
+#include "orbitsim/trajectory_segments.hpp"
 #include "orbitsim/trajectory_types.hpp"
 
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <vector>
 
 namespace orbitsim
 {
+    namespace detail
+    {
+        inline FrameSegmentTransformOptions sanitize_frame_segment_transform_options_(FrameSegmentTransformOptions opt)
+        {
+            opt.min_dt_s = std::max(1.0e-6, opt.min_dt_s);
+            if (!(opt.max_dt_s > 0.0))
+            {
+                opt.max_dt_s = opt.min_dt_s;
+            }
+            opt.max_dt_s = std::max(opt.max_dt_s, opt.min_dt_s);
+            if (opt.soft_max_segments == 0)
+            {
+                opt.soft_max_segments = std::max<std::size_t>(1, opt.hard_max_segments);
+            }
+            if (opt.hard_max_segments == 0)
+            {
+                opt.hard_max_segments = std::max<std::size_t>(opt.soft_max_segments, 1);
+            }
+            opt.hard_max_segments = std::max(opt.hard_max_segments, opt.soft_max_segments);
+            return opt;
+        }
+
+        inline const MassiveBody *body_by_id_(const std::vector<MassiveBody> &bodies, const BodyId id)
+        {
+            if (id == kInvalidBodyId)
+            {
+                return nullptr;
+            }
+            for (const auto &body : bodies)
+            {
+                if (body.id == id)
+                {
+                    return &body;
+                }
+            }
+            return nullptr;
+        }
+
+        inline std::optional<State> inertial_state_to_frame_spec_state_(
+                const State &state_in,
+                const double t_s,
+                const CelestialEphemeris &eph,
+                const std::vector<MassiveBody> &bodies,
+                const TrajectoryFrameSpec &frame,
+                const SpacecraftStateLookup &sc_lookup)
+        {
+            switch (frame.type)
+            {
+            case TrajectoryFrameType::Inertial:
+                return state_in;
+            case TrajectoryFrameType::BodyCenteredInertial:
+            {
+                const MassiveBody *body = body_by_id_(bodies, frame.primary_body_id);
+                if (body == nullptr)
+                {
+                    return std::nullopt;
+                }
+                return inertial_state_to_frame(state_in, make_body_centered_inertial_frame_at(eph, *body, t_s));
+            }
+            case TrajectoryFrameType::BodyFixed:
+            {
+                const MassiveBody *body = body_by_id_(bodies, frame.primary_body_id);
+                if (body == nullptr)
+                {
+                    return std::nullopt;
+                }
+                const std::optional<RotatingFrame> body_fixed = make_body_fixed_frame_at(eph, *body, t_s);
+                if (!body_fixed.has_value())
+                {
+                    return std::nullopt;
+                }
+                return inertial_state_to_frame(state_in, *body_fixed);
+            }
+            case TrajectoryFrameType::Synodic:
+            {
+                const MassiveBody *body_a = body_by_id_(bodies, frame.primary_body_id);
+                const MassiveBody *body_b = body_by_id_(bodies, frame.secondary_body_id);
+                if (body_a == nullptr || body_b == nullptr)
+                {
+                    return std::nullopt;
+                }
+                const std::optional<SynodicFrame> synodic = make_synodic_frame_at(eph, *body_a, *body_b, t_s);
+                if (!synodic.has_value())
+                {
+                    return std::nullopt;
+                }
+                return inertial_state_to_frame(state_in, *synodic);
+            }
+            case TrajectoryFrameType::LVLH:
+            {
+                if (!sc_lookup || frame.target_spacecraft_id == kInvalidSpacecraftId || bodies.empty())
+                {
+                    return std::nullopt;
+                }
+
+                const std::optional<State> target_state = sc_lookup(frame.target_spacecraft_id, t_s);
+                if (!target_state.has_value())
+                {
+                    return std::nullopt;
+                }
+
+                const MassiveBody *primary = body_by_id_(bodies, frame.primary_body_id);
+                if (primary == nullptr)
+                {
+                    const std::size_t primary_index = auto_select_primary_index(
+                            bodies,
+                            target_state->position_m,
+                            [&](const std::size_t i) -> Vec3 {
+                                std::size_t eph_index = 0;
+                                if (eph.body_index_for_id(bodies[i].id, &eph_index))
+                                {
+                                    return eph.body_position_at(eph_index, t_s);
+                                }
+                                return bodies[i].state.position_m;
+                            });
+                    primary = &bodies[primary_index];
+                }
+
+                State primary_state = primary->state;
+                if (!eph.empty())
+                {
+                    primary_state = eph.body_state_at_by_id(primary->id, t_s);
+                }
+
+                const std::optional<RotatingFrame> lvlh = make_lvlh_frame(primary_state, *target_state);
+                if (!lvlh.has_value())
+                {
+                    return std::nullopt;
+                }
+                return inertial_state_to_frame(state_in, *lvlh);
+            }
+            }
+
+            return std::nullopt;
+        }
+
+        inline LocalDynamicsScale frame_state_scale_(const State &state)
+        {
+            const double r = glm::length(state.position_m);
+            const double v = glm::length(state.velocity_mps);
+            LocalDynamicsScale out{};
+            out.r_m = (std::isfinite(r) && r > 1.0) ? r : 1.0;
+            out.v_mps = (std::isfinite(v) && v > 1.0e-6) ? v : 1.0;
+            out.tau_dyn_s = std::max(1.0, out.r_m / out.v_mps);
+            return out;
+        }
+
+        inline TrajectorySegment make_inertial_subsegment_(const TrajectorySegment &segment,
+                                                           const double sub_t0_s,
+                                                           const double sub_t1_s)
+        {
+            return TrajectorySegment{
+                    .t0_s = sub_t0_s,
+                    .dt_s = sub_t1_s - sub_t0_s,
+                    .start = state_at_segment_time_(segment, sub_t0_s),
+                    .end = state_at_segment_time_(segment, sub_t1_s),
+                    .flags = kTrajectorySegmentFlagNone,
+            };
+        }
+
+        inline bool append_transformed_segment_(const TrajectorySegment &segment_inertial,
+                                                const CelestialEphemeris &eph,
+                                                const std::vector<MassiveBody> &bodies,
+                                                const TrajectoryFrameSpec &frame,
+                                                const FrameSegmentTransformOptions &opt,
+                                                const double base_t0_s,
+                                                const double base_duration_s,
+                                                const SpacecraftStateLookup &sc_lookup,
+                                                const std::uint32_t start_flags,
+                                                const std::uint32_t extra_flags,
+                                                std::vector<TrajectorySegment> *segments_out,
+                                                FrameSegmentTransformDiagnostics *diag)
+        {
+            if (segments_out == nullptr || !(segment_inertial.dt_s > 0.0))
+            {
+                return false;
+            }
+            if (cancel_requested_(opt.cancel_requested))
+            {
+                mark_adaptive_cancelled_(diag);
+                return false;
+            }
+
+            const double segment_t1_s = segment_inertial.t0_s + segment_inertial.dt_s;
+            for (const double forced_t_s : opt.forced_split_times_s)
+            {
+                if (!std::isfinite(forced_t_s) || !(forced_t_s > segment_inertial.t0_s) || !(forced_t_s < segment_t1_s))
+                {
+                    continue;
+                }
+
+                const TrajectorySegment left = make_inertial_subsegment_(segment_inertial, segment_inertial.t0_s, forced_t_s);
+                const TrajectorySegment right = make_inertial_subsegment_(segment_inertial, forced_t_s, segment_t1_s);
+                record_adaptive_forced_boundary_(diag);
+                if (!append_transformed_segment_(
+                            left,
+                            eph,
+                            bodies,
+                            frame,
+                            opt,
+                            base_t0_s,
+                            base_duration_s,
+                            sc_lookup,
+                            start_flags,
+                            extra_flags,
+                            segments_out,
+                            diag))
+                {
+                    return false;
+                }
+                return append_transformed_segment_(
+                        right,
+                        eph,
+                        bodies,
+                        frame,
+                        opt,
+                        base_t0_s,
+                        base_duration_s,
+                        sc_lookup,
+                        kTrajectorySegmentFlagForcedBoundary,
+                        extra_flags,
+                        segments_out,
+                        diag);
+            }
+
+            const std::optional<State> start_state = inertial_state_to_frame_spec_state_(
+                    segment_inertial.start, segment_inertial.t0_s, eph, bodies, frame, sc_lookup);
+            const std::optional<State> end_state = inertial_state_to_frame_spec_state_(
+                    segment_inertial.end, segment_t1_s, eph, bodies, frame, sc_lookup);
+            const State midpoint_inertial = state_at_segment_time_(segment_inertial, segment_inertial.t0_s + 0.5 * segment_inertial.dt_s);
+            const std::optional<State> midpoint_state = inertial_state_to_frame_spec_state_(
+                    midpoint_inertial,
+                    segment_inertial.t0_s + 0.5 * segment_inertial.dt_s,
+                    eph,
+                    bodies,
+                    frame,
+                    sc_lookup);
+            if (!start_state.has_value() || !end_state.has_value() || !midpoint_state.has_value())
+            {
+                return false;
+            }
+
+            const double time_alpha =
+                    (base_duration_s > 0.0) ? (((segment_inertial.t0_s + 0.5 * segment_inertial.dt_s) - base_t0_s) / base_duration_s)
+                                            : 0.0;
+            const MidpointError error = midpoint_error_(
+                    *start_state,
+                    *end_state,
+                    *midpoint_state,
+                    segment_inertial.dt_s);
+            const LocalDynamicsScale scale = frame_state_scale_(*midpoint_state);
+            const auto [pos_tol, vel_tol] = adaptive_tolerance_at_(opt.tolerance, time_alpha, scale);
+            const double ratio = error_ratio_(error, pos_tol, vel_tol);
+            const bool within_tolerance = error.finite && error.pos_error_m <= pos_tol && error.vel_error_mps <= vel_tol;
+            const bool dt_exceeds_cap = opt.max_dt_s > 0.0 && segment_inertial.dt_s > (opt.max_dt_s * (1.0 + 1.0e-9));
+
+            bool hard_cap_accept = false;
+            const bool accept = (!dt_exceeds_cap && within_tolerance) ||
+                                adaptive_accept_interval_(
+                                        within_tolerance && !dt_exceeds_cap,
+                                        ratio,
+                                        segment_inertial.dt_s,
+                                        opt.min_dt_s,
+                                        segments_out->size(),
+                                        opt.soft_max_segments,
+                                        opt.hard_max_segments,
+                                        &hard_cap_accept);
+            if (accept || !(0.5 * segment_inertial.dt_s > 0.0))
+            {
+                if (hard_cap_accept)
+                {
+                    mark_adaptive_hard_cap_(diag);
+                }
+                segments_out->push_back(TrajectorySegment{
+                        .t0_s = segment_inertial.t0_s,
+                        .dt_s = segment_inertial.dt_s,
+                        .start = *start_state,
+                        .end = *end_state,
+                        .flags = start_flags | extra_flags,
+                });
+                record_adaptive_accept_(diag, segment_inertial.dt_s);
+                return true;
+            }
+
+            record_adaptive_reject_(diag);
+            if (diag != nullptr)
+            {
+                ++diag->frame_resegmentation_count;
+            }
+
+            const double split_t_s = segment_inertial.t0_s + 0.5 * segment_inertial.dt_s;
+            const TrajectorySegment left = make_inertial_subsegment_(segment_inertial, segment_inertial.t0_s, split_t_s);
+            const TrajectorySegment right = make_inertial_subsegment_(segment_inertial, split_t_s, segment_t1_s);
+            const std::uint32_t split_flags = extra_flags | kTrajectorySegmentFlagFrameResegmented;
+
+            if (!append_transformed_segment_(
+                        left,
+                        eph,
+                        bodies,
+                        frame,
+                        opt,
+                        base_t0_s,
+                        base_duration_s,
+                        sc_lookup,
+                        start_flags,
+                        split_flags,
+                        segments_out,
+                        diag))
+            {
+                return false;
+            }
+            return append_transformed_segment_(
+                    right,
+                    eph,
+                    bodies,
+                    frame,
+                    opt,
+                    base_t0_s,
+                    base_duration_s,
+                    sc_lookup,
+                    kTrajectorySegmentFlagNone,
+                    split_flags,
+                    segments_out,
+                    diag);
+        }
+    } // namespace detail
 
     // -------------------------------------------------------------------------
     // Trajectory <-> frame transforms (display/analysis only; does not affect dynamics).
@@ -315,6 +644,62 @@ namespace orbitsim
         }
 
         return samples_in;
+    }
+
+    inline std::vector<TrajectorySegment> transform_trajectory_segments_to_frame_spec(
+            const std::vector<TrajectorySegment> &inertial_segments,
+            const CelestialEphemeris &eph,
+            const std::vector<MassiveBody> &bodies,
+            const TrajectoryFrameSpec &frame,
+            const FrameSegmentTransformOptions &opt,
+            const SpacecraftStateLookup &sc_lookup = nullptr,
+            FrameSegmentTransformDiagnostics *out_diag = nullptr)
+    {
+        detail::reset_adaptive_diagnostics_(out_diag);
+
+        std::vector<TrajectorySegment> out;
+        if (inertial_segments.empty())
+        {
+            return out;
+        }
+
+        if (frame.type == TrajectoryFrameType::Inertial)
+        {
+            out = inertial_segments;
+            for (const auto &segment : out)
+            {
+                detail::record_adaptive_accept_(out_diag, segment.dt_s);
+            }
+            return out;
+        }
+
+        const FrameSegmentTransformOptions clean_opt = detail::sanitize_frame_segment_transform_options_(opt);
+        const double base_t0_s = inertial_segments.front().t0_s;
+        const double base_t1_s = inertial_segments.back().t0_s + inertial_segments.back().dt_s;
+        const double base_duration_s = std::max(0.0, base_t1_s - base_t0_s);
+
+        out.reserve(inertial_segments.size());
+        for (const TrajectorySegment &segment : inertial_segments)
+        {
+            if (!detail::append_transformed_segment_(
+                        segment,
+                        eph,
+                        bodies,
+                        frame,
+                        clean_opt,
+                        base_t0_s,
+                        base_duration_s,
+                        sc_lookup,
+                        segment.flags,
+                        kTrajectorySegmentFlagNone,
+                        &out,
+                        out_diag))
+            {
+                break;
+            }
+        }
+
+        return out;
     }
 
 } // namespace orbitsim

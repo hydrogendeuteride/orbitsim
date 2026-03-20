@@ -116,7 +116,8 @@ namespace orbitsim
             }
 
             const double dist_tol_m = std::max(0.0, opt.dist_tol_m);
-            if (has_crossing_bracket_(f0, f1, dist_tol_m))
+            const bool start_on_boundary = std::abs(f0) <= dist_tol_m;
+            if (!start_on_boundary && has_crossing_bracket_(f0, f1, dist_tol_m))
             {
                 return CrossingBracket{.t0_s = t0_s, .t1_s = t1_s, .f0 = f0, .f1 = f1};
             }
@@ -135,7 +136,19 @@ namespace orbitsim
 
             double ta = t0_s;
             double fa = f0;
-            for (int i = 1; i <= scans; ++i)
+            int start_scan = 1;
+            if (start_on_boundary)
+            {
+                ta = (scans == 1) ? t1_s : (t0_s + dt_scan);
+                fa = eval_f(ta);
+                if (!std::isfinite(fa))
+                {
+                    return std::nullopt;
+                }
+                start_scan = (scans == 1) ? 2 : 2;
+            }
+
+            for (int i = start_scan; i <= scans; ++i)
             {
                 const double tb = (i == scans) ? t1_s : (t0_s + dt_scan * static_cast<double>(i));
                 const double fb = eval_f(tb);
@@ -152,6 +165,51 @@ namespace orbitsim
             }
 
             return std::nullopt;
+        }
+
+        template<class EvalF>
+        inline Crossing crossing_from_bracket_(const CrossingBracket &bracket, const EventOptions &opt, EvalF eval_f)
+        {
+            const double f0_raw = bracket.f0;
+            const double f1_raw = bracket.f1;
+            double f0 = f0_raw;
+            double f1 = f1_raw;
+            const double dist_tol_m = std::max(0.0, opt.dist_tol_m);
+            const double probe_dt =
+                    std::max(std::max(0.0, opt.time_tol_s), (bracket.t1_s - bracket.t0_s) * 1.0e-6);
+
+            if (std::abs(f1_raw) <= dist_tol_m && std::abs(f0_raw) > dist_tol_m)
+            {
+                return (f0_raw > 0.0) ? Crossing::Enter : Crossing::Exit;
+            }
+
+            if (std::abs(f0) <= dist_tol_m)
+            {
+                const double probe_t = std::min(bracket.t1_s, bracket.t0_s + probe_dt);
+                if (probe_t > bracket.t0_s)
+                {
+                    const double fp = eval_f(probe_t);
+                    if (std::isfinite(fp) && std::abs(fp) > dist_tol_m)
+                    {
+                        f0 = fp;
+                    }
+                }
+            }
+
+            if (std::abs(f1) <= dist_tol_m)
+            {
+                const double probe_t = std::max(bracket.t0_s, bracket.t1_s - probe_dt);
+                if (probe_t < bracket.t1_s)
+                {
+                    const double fp = eval_f(probe_t);
+                    if (std::isfinite(fp) && std::abs(fp) > dist_tol_m)
+                    {
+                        f1 = fp;
+                    }
+                }
+            }
+
+            return (f0 > 0.0 && f1 <= 0.0) ? Crossing::Enter : Crossing::Exit;
         }
 
         template<class EvalF>
@@ -317,8 +375,7 @@ namespace orbitsim
                     continue;
                 }
 
-                const Crossing crossing = (bracket->f0 > 0.0 && bracket->f1 <= 0.0) ? Crossing::Enter
-                                                                                      : Crossing::Exit;
+                const Crossing crossing = detail::crossing_from_bracket_(*bracket, opt, eval_f);
                 const double t_event = detail::bisect_crossing_time_s(
                         bracket->t0_s, bracket->t1_s, bracket->f0, opt, eval_f);
                 if (!std::isfinite(t_event))
@@ -416,7 +473,7 @@ namespace orbitsim
             return std::nullopt;
         }
 
-        const Crossing crossing = (bracket->f0 > 0.0 && bracket->f1 <= 0.0) ? Crossing::Enter : Crossing::Exit;
+        const Crossing crossing = detail::crossing_from_bracket_(*bracket, opt, eval_f);
         const double t_event = detail::bisect_crossing_time_s(
                 bracket->t0_s, bracket->t1_s, bracket->f0, opt, eval_f);
         if (!std::isfinite(t_event))

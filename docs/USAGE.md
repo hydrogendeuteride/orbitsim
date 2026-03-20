@@ -14,6 +14,7 @@ A header-only C++20 orbit simulation library for KSP-style games.
 8. [Coordinate Frame Transformations](#coordinate-frame-transformations)
 9. [Orbital Mechanics Utilities](#orbital-mechanics-utilities)
 10. [Lambert Solver](#lambert-solver)
+11. [Adaptive APIs](#adaptive-apis)
 
 ---
 
@@ -828,6 +829,51 @@ Behavior:
 ---
 
 ## Lambert Solver
+
+## Adaptive APIs
+
+For long-horizon prediction, prefer the adaptive ephemeris/segment APIs and treat samples as a derived display format.
+
+```c++
+AdaptiveEphemerisOptions eph_opt;
+eph_opt.duration_s = days(30.0);
+eph_opt.min_dt_s = 1.0;
+eph_opt.max_dt_s = hours(6.0);
+
+AdaptiveEphemerisDiagnostics eph_diag;
+CelestialEphemeris eph = build_celestial_ephemeris_adaptive(sim, eph_opt, &eph_diag);
+
+AdaptiveSegmentOptions seg_opt;
+seg_opt.duration_s = days(30.0);
+seg_opt.min_dt_s = 1.0;
+seg_opt.max_dt_s = hours(6.0);
+seg_opt.lookup_max_dt_s = minutes(5.0);
+seg_opt.split_at_impulses = true;
+seg_opt.split_at_burn_boundaries = true;
+
+AdaptiveSegmentDiagnostics seg_diag;
+std::vector<TrajectorySegment> root_segments =
+    predict_spacecraft_trajectory_segments_adaptive(sim, eph, ship_id, seg_opt, &seg_diag);
+```
+
+To transform those root segments into a display frame without regenerating them from samples:
+
+```c++
+FrameSegmentTransformOptions frame_opt;
+frame_opt.min_dt_s = 1.0;
+frame_opt.max_dt_s = hours(6.0);
+
+FrameSegmentTransformDiagnostics frame_diag;
+std::vector<TrajectorySegment> body_fixed_segments =
+    transform_trajectory_segments_to_frame_spec(
+        root_segments,
+        eph,
+        sim.massive_bodies(),
+        TrajectoryFrameSpec::body_fixed(earth_id),
+        frame_opt,
+        nullptr,
+        &frame_diag);
+```
 
 Computes the required velocities given two positions and time-of-flight.
 

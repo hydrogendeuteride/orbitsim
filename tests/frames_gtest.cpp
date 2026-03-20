@@ -74,3 +74,87 @@ TEST(Frames, Cr3bpLagrangePointMarkersConsistency)
     EXPECT_NEAR(f(pts->L3_m.x / separation_m), 0.0, 1e-12);
 }
 
+TEST(Frames, AdaptiveBodyFixedSegmentTransformResegmentsCurvedFrameMotion)
+{
+    orbitsim::GameSimulation::Config cfg{};
+    cfg.gravitational_constant = 0.0;
+    cfg.enable_events = false;
+
+    orbitsim::GameSimulation sim(cfg);
+
+    orbitsim::MassiveBody body{};
+    body.mass_kg = 1.0;
+    body.radius_m = 1.0;
+    body.state = orbitsim::make_state({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 1.0, 0.0);
+    const auto body_h = sim.create_body(body);
+    ASSERT_TRUE(body_h.valid());
+
+    orbitsim::AdaptiveEphemerisOptions eph_opt{};
+    eph_opt.duration_s = 2.0;
+    eph_opt.min_dt_s = 0.125;
+    eph_opt.max_dt_s = 2.0;
+    const orbitsim::CelestialEphemeris eph = orbitsim::build_celestial_ephemeris_adaptive(sim, eph_opt);
+    ASSERT_FALSE(eph.empty());
+
+    const orbitsim::TrajectorySegment inertial_segment{
+            .t0_s = 0.0,
+            .dt_s = 2.0,
+            .start = orbitsim::make_state({1000.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+            .end = orbitsim::make_state({1000.0, 0.0, 0.0}, {0.0, 0.0, 0.0}),
+            .flags = 0u,
+    };
+
+    orbitsim::FrameSegmentTransformOptions frame_opt{};
+    frame_opt.min_dt_s = 0.125;
+    frame_opt.max_dt_s = 2.0;
+    frame_opt.soft_max_segments = 16;
+    frame_opt.hard_max_segments = 64;
+    frame_opt.tolerance.pos_near_m = 1.0e-3;
+    frame_opt.tolerance.pos_far_m = 1.0e-3;
+    frame_opt.tolerance.vel_near_mps = 1.0e-3;
+    frame_opt.tolerance.vel_far_mps = 1.0e-3;
+
+    orbitsim::FrameSegmentTransformDiagnostics diag{};
+    const std::vector<orbitsim::TrajectorySegment> transformed =
+            orbitsim::transform_trajectory_segments_to_frame_spec(
+                    {inertial_segment},
+                    eph,
+                    sim.massive_bodies(),
+                    orbitsim::TrajectoryFrameSpec::body_fixed(body_h.id),
+                    frame_opt,
+                    nullptr,
+                    &diag);
+    ASSERT_GT(transformed.size(), 1u);
+    EXPECT_GT(diag.frame_resegmentation_count, 0u);
+
+    bool saw_resegmented_flag = false;
+    for (const auto &segment : transformed)
+    {
+        saw_resegmented_flag = saw_resegmented_flag ||
+                               ((segment.flags & orbitsim::kTrajectorySegmentFlagFrameResegmented) != 0u);
+    }
+    EXPECT_TRUE(saw_resegmented_flag);
+
+    const std::vector<orbitsim::TrajectorySample> exact_inertial = {
+            {.t_s = 0.0, .position_m = {1000.0, 0.0, 0.0}, .velocity_mps = {0.0, 0.0, 0.0}},
+            {.t_s = 1.0, .position_m = {1000.0, 0.0, 0.0}, .velocity_mps = {0.0, 0.0, 0.0}},
+            {.t_s = 2.0, .position_m = {1000.0, 0.0, 0.0}, .velocity_mps = {0.0, 0.0, 0.0}},
+    };
+    const std::vector<orbitsim::TrajectorySample> exact_body_fixed = orbitsim::trajectory_to_frame_spec(
+            exact_inertial,
+            eph,
+            sim.massive_bodies(),
+            orbitsim::TrajectoryFrameSpec::body_fixed(body_h.id));
+    ASSERT_EQ(exact_body_fixed.size(), 3u);
+
+    const std::vector<orbitsim::TrajectorySample> sampled =
+            orbitsim::sample_trajectory_segments_uniform_dt(transformed, 1.0, 8, true, true);
+    ASSERT_EQ(sampled.size(), 3u);
+
+    for (std::size_t i = 0; i < sampled.size(); ++i)
+    {
+        EXPECT_TRUE(near_abs(sampled[i].t_s, exact_body_fixed[i].t_s, 1e-12));
+        EXPECT_TRUE(near_vec_abs(sampled[i].position_m, exact_body_fixed[i].position_m, 5.0e-3));
+        EXPECT_TRUE(near_vec_abs(sampled[i].velocity_mps, exact_body_fixed[i].velocity_mps, 5.0e-3));
+    }
+}
