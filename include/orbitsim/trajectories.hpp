@@ -711,16 +711,17 @@ namespace orbitsim
 
             const bool dt_exceeds_cap = opt.max_dt_s > 0.0 && dt_s > (opt.max_dt_s * (1.0 + 1.0e-9));
             bool hard_cap_accept = false;
-            const bool accept = (!dt_exceeds_cap && within_tolerance) ||
-                                adaptive_accept_interval_(
-                                        within_tolerance && !dt_exceeds_cap,
-                                        error_ratio,
-                                        dt_s,
-                                        std::max(1.0e-6, opt.min_dt_s),
-                                        segments_out->size(),
-                                        opt.soft_max_segments,
-                                        opt.hard_max_segments,
-                                        &hard_cap_accept);
+            const bool accept = !dt_exceeds_cap &&
+                                (within_tolerance ||
+                                 adaptive_accept_interval_(
+                                         within_tolerance,
+                                         error_ratio,
+                                         dt_s,
+                                         std::max(1.0e-6, opt.min_dt_s),
+                                         segments_out->size(),
+                                         opt.soft_max_segments,
+                                         opt.hard_max_segments,
+                                         &hard_cap_accept));
 
             if (accept || !(0.5 * dt_s > 0.0))
             {
@@ -739,6 +740,7 @@ namespace orbitsim
             }
 
             record_adaptive_reject_(diag);
+            const std::size_t left_segment_count = segments_out->size();
             if (!append_adaptive_ephemeris_interval_(
                         sim,
                         opt,
@@ -751,11 +753,21 @@ namespace orbitsim
             {
                 return false;
             }
+            std::vector<MassiveBody> refined_midpoint_massive = step.midpoint_massive;
+            if (segments_out->size() > left_segment_count &&
+                segments_out->back().end.size() == refined_midpoint_massive.size())
+            {
+                const std::vector<State> &refined_midpoint_states = segments_out->back().end;
+                for (std::size_t i = 0; i < refined_midpoint_massive.size(); ++i)
+                {
+                    refined_midpoint_massive[i].state = refined_midpoint_states[i];
+                }
+            }
             return append_adaptive_ephemeris_interval_(
                     sim,
                     opt,
                     base_t0_s,
-                    step.midpoint_massive,
+                    refined_midpoint_massive,
                     t_mid_s,
                     0.5 * dt_s,
                     segments_out,
@@ -931,16 +943,17 @@ namespace orbitsim
             const bool dt_exceeds_cap = opt.max_dt_s > 0.0 && dt_s > (opt.max_dt_s * (1.0 + 1.0e-9));
 
             bool hard_cap_accept = false;
-            const bool accept = (!dt_exceeds_cap && within_tolerance) ||
-                                adaptive_accept_interval_(
-                                        within_tolerance && !dt_exceeds_cap,
-                                        ratio,
-                                        dt_s,
-                                        min_dt_s,
-                                        segments_out->size(),
-                                        opt.soft_max_segments,
-                                        opt.hard_max_segments,
-                                        &hard_cap_accept);
+            const bool accept = !dt_exceeds_cap &&
+                                (within_tolerance ||
+                                 adaptive_accept_interval_(
+                                         within_tolerance,
+                                         ratio,
+                                         dt_s,
+                                         min_dt_s,
+                                         segments_out->size(),
+                                         opt.soft_max_segments,
+                                         opt.hard_max_segments,
+                                         &hard_cap_accept));
             if (accept || !(0.5 * dt_s > 0.0) || lookup_dt_s <= 0.0)
             {
                 if (hard_cap_accept)
@@ -999,7 +1012,7 @@ namespace orbitsim
                         sim,
                         eph,
                         opt,
-                        sc_mid,
+                        left_end,
                         sc_lookup,
                         base_t0_s,
                         t_mid_s,
