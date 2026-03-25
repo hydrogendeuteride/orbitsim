@@ -1,6 +1,41 @@
 #include <gtest/gtest.h>
 #include "test_helpers.hpp"
 
+TEST(SoiRadius, ComputeLaplaceMatchesEarthMoonApproximation)
+{
+    constexpr double kEarthMassKg = 5.97219e24;
+    constexpr double kMoonMassKg = 7.34767309e22;
+    constexpr double kMoonSemiMajorAxisM = 384'399'000.0;
+
+    const std::optional<double> laplace_soi =
+            orbitsim::compute_laplace_soi_radius(kMoonMassKg, kEarthMassKg, kMoonSemiMajorAxisM);
+    ASSERT_TRUE(laplace_soi.has_value());
+    EXPECT_NEAR(*laplace_soi, 6.61e7, 2.0e5);
+}
+
+TEST(SoiRadius, ComputeHillUsesPeriapsisAndRejectsInvalidInputs)
+{
+    constexpr double kEarthMassKg = 5.97219e24;
+    constexpr double kMoonMassKg = 7.34767309e22;
+    constexpr double kMoonSemiMajorAxisM = 384'399'000.0;
+
+    const std::optional<double> hill_circular =
+            orbitsim::compute_hill_soi_radius(kMoonMassKg, kEarthMassKg, kMoonSemiMajorAxisM);
+    const std::optional<double> hill_eccentric =
+            orbitsim::compute_hill_soi_radius(kMoonMassKg, kEarthMassKg, kMoonSemiMajorAxisM, 0.1);
+
+    ASSERT_TRUE(hill_circular.has_value());
+    ASSERT_TRUE(hill_eccentric.has_value());
+    EXPECT_NEAR(*hill_circular, 6.15e7, 2.0e5);
+    EXPECT_LT(*hill_eccentric, *hill_circular);
+
+    EXPECT_FALSE(orbitsim::compute_laplace_soi_radius(0.0, kEarthMassKg, kMoonSemiMajorAxisM).has_value());
+    EXPECT_FALSE(orbitsim::compute_laplace_soi_radius(kMoonMassKg, 0.0, kMoonSemiMajorAxisM).has_value());
+    EXPECT_FALSE(orbitsim::compute_laplace_soi_radius(kMoonMassKg, kEarthMassKg, 0.0).has_value());
+    EXPECT_FALSE(orbitsim::compute_hill_soi_radius(kMoonMassKg, kEarthMassKg, kMoonSemiMajorAxisM, -0.1).has_value());
+    EXPECT_FALSE(orbitsim::compute_hill_soi_radius(kMoonMassKg, kEarthMassKg, kMoonSemiMajorAxisM, 1.0).has_value());
+}
+
 TEST(SoiRails, SelectLocalBodyAndUseHysteresis)
 {
     orbitsim::GameSimulation::Config cfg{};
@@ -84,4 +119,3 @@ TEST(SoiRails, FallbackToMaxAccelWhenNoSoiConfigured)
             orbitsim::select_primary_body_id_rails(sim, eph, sc_pos, 0.0, orbitsim::kInvalidBodyId, opt);
     EXPECT_EQ(primary, b1_h.id);
 }
-

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <optional>
 
@@ -33,6 +34,82 @@ namespace orbitsim
         /// If no SOI contains the spacecraft (or SOIs are not configured), fall back to max-accel selection.
         bool fallback_to_max_accel{true};
     };
+
+    enum class SoiRadiusModel : std::uint8_t
+    {
+        Laplace = 0,
+        Hill,
+    };
+
+    /**
+     * @brief Compute the classical Laplace sphere-of-influence radius.
+     *
+     * The mass ratio is dimensionless, so callers may also pass gravitational
+     * parameters (mu) instead of masses as long as both arguments use the same convention.
+     *
+     * Formula:
+     *   r_soi = a * pow(m_child / m_parent, 2/5)
+     */
+    inline std::optional<double>
+    compute_laplace_soi_radius(const double child_mass_kg, const double parent_mass_kg,
+                               const double semi_major_axis_m)
+    {
+        if (!(child_mass_kg > 0.0) || !std::isfinite(child_mass_kg) || !(parent_mass_kg > 0.0) ||
+            !std::isfinite(parent_mass_kg) || !(semi_major_axis_m > 0.0) || !std::isfinite(semi_major_axis_m))
+        {
+            return std::nullopt;
+        }
+
+        const double mass_ratio = child_mass_kg / parent_mass_kg;
+        if (!(mass_ratio > 0.0) || !std::isfinite(mass_ratio))
+        {
+            return std::nullopt;
+        }
+
+        const double soi_radius_m = semi_major_axis_m * std::pow(mass_ratio, 2.0 / 5.0);
+        if (!(soi_radius_m > 0.0) || !std::isfinite(soi_radius_m))
+        {
+            return std::nullopt;
+        }
+        return soi_radius_m;
+    }
+
+    /**
+     * @brief Compute the Hill sphere radius using periapsis distance.
+     *
+     * Formula:
+     *   r_hill = a * (1 - e) * cbrt(m_child / (3 * m_parent))
+     */
+    inline std::optional<double>
+    compute_hill_soi_radius(const double child_mass_kg, const double parent_mass_kg, const double semi_major_axis_m,
+                            const double eccentricity = 0.0)
+    {
+        if (!(child_mass_kg > 0.0) || !std::isfinite(child_mass_kg) || !(parent_mass_kg > 0.0) ||
+            !std::isfinite(parent_mass_kg) || !(semi_major_axis_m > 0.0) || !std::isfinite(semi_major_axis_m) ||
+            !(eccentricity >= 0.0) || !std::isfinite(eccentricity) || !(eccentricity < 1.0))
+        {
+            return std::nullopt;
+        }
+
+        const double mass_ratio = child_mass_kg / (3.0 * parent_mass_kg);
+        if (!(mass_ratio > 0.0) || !std::isfinite(mass_ratio))
+        {
+            return std::nullopt;
+        }
+
+        const double periapsis_distance_m = semi_major_axis_m * (1.0 - eccentricity);
+        if (!(periapsis_distance_m > 0.0) || !std::isfinite(periapsis_distance_m))
+        {
+            return std::nullopt;
+        }
+
+        const double soi_radius_m = periapsis_distance_m * std::cbrt(mass_ratio);
+        if (!(soi_radius_m > 0.0) || !std::isfinite(soi_radius_m))
+        {
+            return std::nullopt;
+        }
+        return soi_radius_m;
+    }
 
     namespace soi_detail
     {
