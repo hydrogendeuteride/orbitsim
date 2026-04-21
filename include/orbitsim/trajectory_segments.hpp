@@ -1,6 +1,6 @@
 #pragma once
 
-#include "orbitsim/types.hpp"
+#include "orbitsim/math.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -28,6 +28,92 @@ namespace orbitsim
         State end{};
         std::uint32_t flags{0};
     };
+
+    inline double trajectory_segment_end_time(const TrajectorySegment &segment)
+    {
+        return segment.t0_s + segment.dt_s;
+    }
+
+    inline double trajectory_segment_tau01_at(const TrajectorySegment &segment, const double t_s)
+    {
+        if (!(segment.dt_s > 0.0) || !std::isfinite(segment.dt_s) || !std::isfinite(segment.t0_s) ||
+            !std::isfinite(t_s))
+        {
+            return 0.0;
+        }
+
+        const double tau = (t_s - segment.t0_s) / segment.dt_s;
+        if (!std::isfinite(tau))
+        {
+            return 0.0;
+        }
+        return clamp01(tau);
+    }
+
+    inline Vec3 trajectory_segment_position_at(const TrajectorySegment &segment, const double t_s)
+    {
+        if (!(segment.dt_s > 0.0) || !std::isfinite(segment.dt_s) || !std::isfinite(segment.t0_s) ||
+            !std::isfinite(t_s))
+        {
+            return segment.start.position_m;
+        }
+
+        const double tau = trajectory_segment_tau01_at(segment, t_s);
+        return hermite_position(segment.start.position_m,
+                                segment.start.velocity_mps,
+                                segment.end.position_m,
+                                segment.end.velocity_mps,
+                                segment.dt_s,
+                                tau);
+    }
+
+    inline Vec3 trajectory_segment_velocity_at(const TrajectorySegment &segment, const double t_s)
+    {
+        if (!(segment.dt_s > 0.0) || !std::isfinite(segment.dt_s) || !std::isfinite(segment.t0_s) ||
+            !std::isfinite(t_s))
+        {
+            return segment.start.velocity_mps;
+        }
+
+        const double tau = trajectory_segment_tau01_at(segment, t_s);
+        return hermite_velocity_mps(segment.start.position_m,
+                                    segment.start.velocity_mps,
+                                    segment.end.position_m,
+                                    segment.end.velocity_mps,
+                                    segment.dt_s,
+                                    tau);
+    }
+
+    inline State trajectory_segment_state_at(const TrajectorySegment &segment, const double t_s)
+    {
+        if (!(segment.dt_s > 0.0) || !std::isfinite(segment.dt_s) || !std::isfinite(segment.t0_s) ||
+            !std::isfinite(t_s))
+        {
+            return segment.start;
+        }
+
+        const double tau = trajectory_segment_tau01_at(segment, t_s);
+        const double t_eval_s = segment.t0_s + tau * segment.dt_s;
+
+        State out{};
+        out.position_m = hermite_position(segment.start.position_m,
+                                          segment.start.velocity_mps,
+                                          segment.end.position_m,
+                                          segment.end.velocity_mps,
+                                          segment.dt_s,
+                                          tau);
+        out.velocity_mps = hermite_velocity_mps(segment.start.position_m,
+                                                segment.start.velocity_mps,
+                                                segment.end.position_m,
+                                                segment.end.velocity_mps,
+                                                segment.dt_s,
+                                                tau);
+        out.spin.axis = normalized_or(segment.start.spin.axis, Vec3{0.0, 1.0, 0.0});
+        out.spin.rate_rad_per_s = segment.start.spin.rate_rad_per_s;
+        out.spin.angle_rad = segment.start.spin.angle_rad +
+                             segment.start.spin.rate_rad_per_s * (t_eval_s - segment.t0_s);
+        return out;
+    }
 
     struct TrajectorySegmentOptions
     {

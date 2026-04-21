@@ -1216,21 +1216,7 @@ namespace orbitsim
 
         inline State state_at_segment_time_(const TrajectorySegment &seg, const double t_s)
         {
-            if (!(seg.dt_s > 0.0) || !std::isfinite(seg.dt_s))
-                return seg.start;
-
-            const double tau = clamp01((t_s - seg.t0_s) / seg.dt_s);
-            const double t_eval_s = seg.t0_s + tau * seg.dt_s;
-
-            State out{};
-            out.position_m = hermite_position(seg.start.position_m, seg.start.velocity_mps,
-                                              seg.end.position_m, seg.end.velocity_mps, seg.dt_s, tau);
-            out.velocity_mps = hermite_velocity_mps(seg.start.position_m, seg.start.velocity_mps,
-                                                    seg.end.position_m, seg.end.velocity_mps, seg.dt_s, tau);
-            out.spin.axis = normalized_or(seg.start.spin.axis, Vec3{0.0, 1.0, 0.0});
-            out.spin.rate_rad_per_s = seg.start.spin.rate_rad_per_s;
-            out.spin.angle_rad = seg.start.spin.angle_rad + seg.start.spin.rate_rad_per_s * (t_eval_s - seg.t0_s);
-            return out;
+            return trajectory_segment_state_at(seg, t_s);
         }
 
         inline State state_at_segments_time_(const std::vector<TrajectorySegment> &segments, const double t_s)
