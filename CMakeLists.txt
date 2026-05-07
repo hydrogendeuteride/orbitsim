@@ -20,6 +20,9 @@ else ()
 endif ()
 
 add_library(orbitsim INTERFACE
+        include/orbitsim/kepler.hpp
+        include/orbitsim/kepler_trajectory.hpp
+        include/orbitsim/kepler_maneuver.hpp
         include/orbitsim/lambert.hpp)
 target_include_directories(orbitsim
         INTERFACE
@@ -67,6 +70,7 @@ if (ORBITSIM_ENABLE_GTEST)
             tests/nodes_gtest.cpp
             tests/coordinate_frames_gtest.cpp
             tests/lambert_gtest.cpp
+            tests/kepler_gtest.cpp
     )
     target_link_libraries(orbitsim_gtests PRIVATE orbitsim GTest::gtest_main)
 
