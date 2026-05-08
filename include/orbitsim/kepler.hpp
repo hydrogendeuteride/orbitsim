@@ -103,6 +103,141 @@ namespace orbitsim
             out_S = stumpff_S(z);
             return std::isfinite(out_C) && std::isfinite(out_S);
         }
+
+        struct UniversalKeplerEvaluation_
+        {
+            KeplerStatus status{KeplerStatus::InvalidInitialState};
+            double F{std::numeric_limits<double>::quiet_NaN()};
+            double dF{std::numeric_limits<double>::quiet_NaN()};
+            double z{std::numeric_limits<double>::quiet_NaN()};
+            double C{0.0};
+            double S{0.0};
+        };
+
+        inline UniversalKeplerEvaluation_ evaluate_universal_kepler_(
+                const double sqrt_mu,
+                const double r0,
+                const double vr0,
+                const double alpha,
+                const double dt_s,
+                const double chi,
+                const KeplerPropagationOptions &opt)
+        {
+            UniversalKeplerEvaluation_ out;
+            out.z = alpha * chi * chi;
+            if (!safe_stumpff_(out.z, opt, out.C, out.S))
+            {
+                out.status = KeplerStatus::StumpffOverflow;
+                return out;
+            }
+
+            out.F = (r0 * vr0 / sqrt_mu) * (chi * chi) * out.C +
+                    (1.0 - alpha * r0) * (chi * chi * chi) * out.S +
+                    r0 * chi -
+                    sqrt_mu * dt_s;
+            if (!std::isfinite(out.F))
+            {
+                out.status = KeplerStatus::InvalidFinalState;
+                return out;
+            }
+
+            out.dF = (r0 * vr0 / sqrt_mu) * chi * (1.0 - out.z * out.S) +
+                     (1.0 - alpha * r0) * (chi * chi) * out.C +
+                     r0;
+            if (!(std::abs(out.dF) > 0.0) || !std::isfinite(out.dF))
+            {
+                out.status = KeplerStatus::ZeroDerivative;
+                return out;
+            }
+
+            out.status = KeplerStatus::Ok;
+            return out;
+        }
+
+        inline bool bracket_universal_kepler_root_(
+                const double sqrt_mu,
+                const double r0,
+                const double vr0,
+                const double alpha,
+                const double dt_s,
+                const double initial_chi,
+                const KeplerPropagationOptions &opt,
+                double &out_low,
+                double &out_high,
+                KeplerStatus &out_status)
+        {
+            constexpr int kMaxBracketExpansions = 128;
+
+            const UniversalKeplerEvaluation_ zero =
+                    evaluate_universal_kepler_(sqrt_mu, r0, vr0, alpha, dt_s, 0.0, opt);
+            if (zero.status != KeplerStatus::Ok)
+            {
+                out_status = zero.status;
+                return false;
+            }
+
+            double extent = std::abs(initial_chi);
+            if (!(extent > 0.0) || !std::isfinite(extent))
+            {
+                extent = 1.0;
+            }
+
+            if (dt_s > 0.0)
+            {
+                out_low = 0.0;
+                out_high = extent;
+                for (int i = 0; i < kMaxBracketExpansions; ++i)
+                {
+                    const UniversalKeplerEvaluation_ high =
+                            evaluate_universal_kepler_(sqrt_mu, r0, vr0, alpha, dt_s, out_high, opt);
+                    if (high.status != KeplerStatus::Ok)
+                    {
+                        out_status = high.status;
+                        return false;
+                    }
+                    if (high.F >= 0.0)
+                    {
+                        out_status = KeplerStatus::Ok;
+                        return true;
+                    }
+                    out_high *= 2.0;
+                    if (!std::isfinite(out_high))
+                    {
+                        out_status = KeplerStatus::InvalidFinalState;
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                out_low = -extent;
+                out_high = 0.0;
+                for (int i = 0; i < kMaxBracketExpansions; ++i)
+                {
+                    const UniversalKeplerEvaluation_ low =
+                            evaluate_universal_kepler_(sqrt_mu, r0, vr0, alpha, dt_s, out_low, opt);
+                    if (low.status != KeplerStatus::Ok)
+                    {
+                        out_status = low.status;
+                        return false;
+                    }
+                    if (low.F <= 0.0)
+                    {
+                        out_status = KeplerStatus::Ok;
+                        return true;
+                    }
+                    out_low *= 2.0;
+                    if (!std::isfinite(out_low))
+                    {
+                        out_status = KeplerStatus::InvalidFinalState;
+                        return false;
+                    }
+                }
+            }
+
+            out_status = KeplerStatus::DidNotConverge;
+            return false;
+        }
     } // namespace detail
 
     inline KeplerPropagationResult propagate_kepler_universal_safe(const double mu_m3_s2, const Vec3 &r0_m,
@@ -179,25 +314,46 @@ namespace orbitsim
         const double abs_step_tolerance = std::abs(opt.step_tolerance);
         const double rel_step_tolerance = std::abs(opt.rel_step_tolerance);
 
+        double bracket_low = 0.0;
+        double bracket_high = 0.0;
+        KeplerStatus bracket_status = KeplerStatus::Ok;
+        if (!detail::bracket_universal_kepler_root_(sqrt_mu,
+                                                    r0,
+                                                    vr0,
+                                                    alpha,
+                                                    dt_s,
+                                                    chi,
+                                                    opt,
+                                                    bracket_low,
+                                                    bracket_high,
+                                                    bracket_status))
+        {
+            out.diagnostics.status = bracket_status;
+            out.diagnostics.chi = chi;
+            return out;
+        }
+
+        chi = std::clamp(chi, bracket_low, bracket_high);
+        if (!(chi > bracket_low && chi < bracket_high))
+        {
+            chi = 0.5 * (bracket_low + bracket_high);
+        }
+
         bool converged = false;
         for (int it = 0; it < max_iter; ++it)
         {
             ++out.diagnostics.iterations;
-            const double z = alpha * chi * chi;
-            out.diagnostics.z = z;
-
-            double C = 0.0;
-            double S = 0.0;
-            if (!detail::safe_stumpff_(z, opt, C, S))
+            detail::UniversalKeplerEvaluation_ eval =
+                    detail::evaluate_universal_kepler_(sqrt_mu, r0, vr0, alpha, dt_s, chi, opt);
+            out.diagnostics.z = eval.z;
+            if (eval.status != KeplerStatus::Ok)
             {
-                out.diagnostics.status = KeplerStatus::StumpffOverflow;
+                out.diagnostics.status = eval.status;
                 out.diagnostics.chi = chi;
                 return out;
             }
 
-            const double F = (r0 * vr0 / sqrt_mu) * (chi * chi) * C +
-                             (1.0 - alpha * r0) * (chi * chi * chi) * S + r0 * chi - sqrt_mu * dt_s;
-            out.diagnostics.residual = std::abs(F);
+            out.diagnostics.residual = std::abs(eval.F);
 
             if (out.diagnostics.residual <= residual_tolerance)
             {
@@ -205,26 +361,39 @@ namespace orbitsim
                 break;
             }
 
-            const double dF = (r0 * vr0 / sqrt_mu) * chi * (1.0 - z * S) +
-                              (1.0 - alpha * r0) * (chi * chi) * C + r0;
-            if (!(std::abs(dF) > 0.0) || !std::isfinite(dF))
+            if (eval.F < 0.0)
             {
-                out.diagnostics.status = KeplerStatus::ZeroDerivative;
-                out.diagnostics.chi = chi;
-                return out;
+                bracket_low = chi;
+            }
+            else
+            {
+                bracket_high = chi;
             }
 
-            const double delta = F / dF;
-            chi -= delta;
-            if (!std::isfinite(chi))
+            const double newton_chi = chi - (eval.F / eval.dF);
+            double next_chi = newton_chi;
+            if (!(next_chi > bracket_low && next_chi < bracket_high) || !std::isfinite(next_chi))
             {
-                out.diagnostics.status = KeplerStatus::InvalidFinalState;
-                out.diagnostics.chi = chi;
-                return out;
+                next_chi = 0.5 * (bracket_low + bracket_high);
+                out.diagnostics.used_fallback = true;
             }
-            const double relative_step_limit = rel_step_tolerance * std::max(1.0, std::abs(chi));
-            if (std::abs(delta) <= std::max(abs_step_tolerance, relative_step_limit))
+
+            const double relative_step_limit = rel_step_tolerance * std::max(1.0, std::abs(next_chi));
+            const double step_limit = std::max(abs_step_tolerance, relative_step_limit);
+            const double step = std::abs(next_chi - chi);
+            const double bracket_width = std::abs(bracket_high - bracket_low);
+            chi = next_chi;
+            if (step <= step_limit || bracket_width <= step_limit)
             {
+                eval = detail::evaluate_universal_kepler_(sqrt_mu, r0, vr0, alpha, dt_s, chi, opt);
+                if (eval.status != KeplerStatus::Ok)
+                {
+                    out.diagnostics.status = eval.status;
+                    out.diagnostics.chi = chi;
+                    return out;
+                }
+                out.diagnostics.z = eval.z;
+                out.diagnostics.residual = std::abs(eval.F);
                 converged = true;
                 break;
             }

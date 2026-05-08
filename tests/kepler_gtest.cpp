@@ -54,6 +54,49 @@ TEST(Kepler, EccentricOrbitRoundTripsOnePeriod)
     EXPECT_TRUE(near_vec_abs(step.state.velocity_mps, s0.velocity_mps, 1e-5));
 }
 
+TEST(Kepler, HighEccentricOrbitBuildsDenseSamplesThroughOnePeriod)
+{
+    orbitsim::OrbitalElements el{};
+    el.semi_major_axis_m = 100'000'000.0;
+    el.eccentricity = 0.95;
+    el.inclination_rad = 0.35;
+    el.raan_rad = 0.4;
+    el.arg_periapsis_rad = 0.9;
+    el.true_anomaly_rad = 1.57;
+
+    const orbitsim::State s0 = orbitsim::relative_state_from_orbital_elements(kEarthMu, el);
+    const double period_s =
+            2.0 * std::acos(-1.0) *
+            std::sqrt((el.semi_major_axis_m * el.semi_major_axis_m * el.semi_major_axis_m) /
+                      kEarthMu);
+
+    orbitsim::KeplerArc arc{};
+    arc.mu_m3_s2 = kEarthMu;
+    arc.primary_body_id = 42;
+    arc.t0_s = 0.0;
+    arc.t1_s = period_s;
+    arc.state0_relative = s0;
+
+    orbitsim::KeplerTrajectoryOptions opt{};
+    opt.sample_dt_s = period_s / 19'999.0;
+    opt.max_samples = 20'000;
+
+    orbitsim::KeplerTrajectoryDiagnostics diagnostics{};
+    const std::vector<orbitsim::KeplerArcSample> samples =
+            orbitsim::build_kepler_arc_samples(arc, opt, &diagnostics);
+
+    ASSERT_EQ(samples.size(), 20'000u);
+    EXPECT_EQ(diagnostics.accepted_samples, samples.size());
+    EXPECT_EQ(diagnostics.first_failure, orbitsim::KeplerStatus::Ok);
+    EXPECT_TRUE(near_abs(samples.front().t_s, 0.0, 1e-12));
+    EXPECT_TRUE(near_abs(samples.back().t_s, period_s, 1e-6));
+    for (const orbitsim::KeplerArcSample &sample : samples)
+    {
+        ASSERT_TRUE(sample.ok());
+        EXPECT_TRUE(finite_state(sample.state_relative));
+    }
+}
+
 TEST(Kepler, HyperbolicEscapePropagatesFinite)
 {
     const orbitsim::State s0 = orbitsim::make_state({7'000'000.0, 0.0, 0.0}, {0.0, 12'000.0, 0.0});
