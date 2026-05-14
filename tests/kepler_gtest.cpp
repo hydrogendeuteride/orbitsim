@@ -153,6 +153,35 @@ TEST(Kepler, ReportsStumpffOverflow)
     EXPECT_EQ(step.diagnostics.status, orbitsim::KeplerStatus::StumpffOverflow);
 }
 
+TEST(Kepler, ArcSampleFallsBackForHyperbolicStumpffOverflow)
+{
+    orbitsim::KeplerArc arc{};
+    arc.mu_m3_s2 = kEarthMu;
+    arc.primary_body_id = 42;
+    arc.t0_s = 0.0;
+    arc.t1_s = 10'000.0;
+    arc.state0_relative = orbitsim::make_state({7'000'000.0, 0.0, 0.0}, {0.0, 12'000.0, 0.0});
+
+    orbitsim::KeplerPropagationOptions opt{};
+    opt.max_hyperbolic_stumpff_arg = 0.2;
+
+    const orbitsim::KeplerPropagationResult direct =
+            orbitsim::propagate_kepler_universal_safe(arc.mu_m3_s2,
+                                                      arc.state0_relative,
+                                                      arc.t1_s - arc.t0_s,
+                                                      opt);
+    ASSERT_FALSE(direct.ok());
+    EXPECT_EQ(direct.diagnostics.status, orbitsim::KeplerStatus::StumpffOverflow);
+
+    const orbitsim::KeplerArcSample sample =
+            orbitsim::sample_kepler_arc_state(arc, arc.t1_s, opt);
+
+    ASSERT_TRUE(sample.ok());
+    EXPECT_EQ(sample.diagnostics.regime, orbitsim::KeplerOrbitRegime::Hyperbolic);
+    EXPECT_TRUE(sample.diagnostics.used_fallback);
+    EXPECT_TRUE(finite_state(sample.state_relative));
+}
+
 TEST(Kepler, BuildsArcSamplesIncludingEndpoints)
 {
     constexpr double r_m = 7'000'000.0;
