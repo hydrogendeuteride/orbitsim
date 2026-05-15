@@ -48,9 +48,11 @@ namespace orbitsim
     struct SoiTransitionSearchResult
     {
         bool found{false};
+        bool budget_hit{false};
         BodyId from_primary_body_id{kInvalidBodyId};
         BodyId to_primary_body_id{kInvalidBodyId};
         double t_s{std::numeric_limits<double>::quiet_NaN()};
+        double last_tested_t_s{std::numeric_limits<double>::quiet_NaN()};
         std::size_t tested_samples{0};
         KeplerStatus first_failure{KeplerStatus::Ok};
     };
@@ -538,7 +540,9 @@ namespace orbitsim
             out.first_failure = prev_status;
             return out;
         }
+        out.last_tested_t_s = prev_t_s;
 
+        bool reached_limit = false;
         for (std::size_t step_index = 1u; step_index <= max_steps; ++step_index)
         {
             const double offset_s = std::min(abs_duration_s, step_s * static_cast<double>(step_index));
@@ -546,6 +550,7 @@ namespace orbitsim
             KeplerStatus sample_status = KeplerStatus::Ok;
             const BodyId selected = selected_primary_at(t_s, sample_status);
             ++out.tested_samples;
+            out.last_tested_t_s = t_s;
             if (sample_status != KeplerStatus::Ok)
             {
                 out.first_failure = sample_status;
@@ -587,11 +592,16 @@ namespace orbitsim
 
             if (offset_s >= abs_duration_s)
             {
+                reached_limit = true;
                 break;
             }
             prev_t_s = t_s;
         }
 
+        if (!reached_limit)
+        {
+            out.budget_hit = true;
+        }
         return out;
     }
 
