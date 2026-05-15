@@ -2,6 +2,7 @@
 
 #include "orbitsim/ephemeris.hpp"
 #include "orbitsim/game_sim.hpp"
+#include "orbitsim/kepler_trajectory.hpp"
 #include "orbitsim/types.hpp"
 
 #include <algorithm>
@@ -33,6 +34,25 @@ namespace orbitsim
 
         /// If no SOI contains the spacecraft (or SOIs are not configured), fall back to max-accel selection.
         bool fallback_to_max_accel{true};
+    };
+
+    struct SoiTransitionSearchOptions
+    {
+        double max_step_s{300.0};
+        double refine_tolerance_s{0.25};
+        std::size_t max_steps{10000};
+        SoiSwitchOptions switch_options{};
+        KeplerPropagationOptions propagation{};
+    };
+
+    struct SoiTransitionSearchResult
+    {
+        bool found{false};
+        BodyId from_primary_body_id{kInvalidBodyId};
+        BodyId to_primary_body_id{kInvalidBodyId};
+        double t_s{std::numeric_limits<double>::quiet_NaN()};
+        std::size_t tested_samples{0};
+        KeplerStatus first_failure{KeplerStatus::Ok};
     };
 
     enum class SoiRadiusModel : std::uint8_t
@@ -237,6 +257,20 @@ namespace orbitsim
             return b->soi_radius_m;
         }
 
+        inline bool has_other_soi_candidate_(const GameSimulation &sim, const BodyId current_primary_body_id)
+        {
+            for (const MassiveBody &body: sim.massive_bodies())
+            {
+                if (body.id != current_primary_body_id &&
+                    body.soi_radius_m > 0.0 &&
+                    std::isfinite(body.soi_radius_m))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         inline std::optional<double>
         distance_to_body_m_(const GameSimulation &sim, const CelestialEphemeris &eph, const Vec3 &sc_pos_m,
                             const double t_s, const BodyId body_id)
@@ -385,6 +419,180 @@ namespace orbitsim
             return kInvalidBodyId;
         }
         return select_primary_body_id_rails(sim, eph, sc->state.position_m, t_s, current_primary_body_id, opt);
+    }
+
+    inline std::optional<Vec3> sample_kepler_arc_inertial_position_at(const GameSimulation &sim,
+                                                                      const CelestialEphemeris &eph,
+                                                                      const KeplerArc &arc,
+                                                                      const double t_s,
+                                                                      const KeplerPropagationOptions &propagation,
+                                                                      KeplerStatus *out_status = nullptr)
+    {
+        if (out_status)
+        {
+            *out_status = KeplerStatus::Ok;
+        }
+
+        const KeplerArcSample sample = sample_kepler_arc_state(arc, t_s, propagation);
+        if (!sample.ok())
+        {
+            if (out_status)
+            {
+                *out_status = sample.diagnostics.status;
+            }
+            return std::nullopt;
+        }
+
+        Vec3 primary_pos_m{0.0, 0.0, 0.0};
+        if (!soi_detail::body_position_at_(sim, eph, arc.primary_body_id, t_s, &primary_pos_m))
+        {
+            if (out_status)
+            {
+                *out_status = KeplerStatus::InvalidFinalState;
+            }
+            return std::nullopt;
+        }
+
+        const Vec3 inertial_position_m = primary_pos_m + sample.state_relative.position_m;
+        if (!detail::finite3_(inertial_position_m))
+        {
+            if (out_status)
+            {
+                *out_status = KeplerStatus::InvalidFinalState;
+            }
+            return std::nullopt;
+        }
+        return inertial_position_m;
+    }
+
+    inline SoiTransitionSearchResult find_next_soi_transition_on_kepler_arc(const GameSimulation &sim,
+                                                                           const CelestialEphemeris &eph,
+                                                                           const KeplerArc &arc,
+                                                                           const BodyId current_primary_body_id,
+                                                                           const double t_limit_s,
+                                                                           const SoiTransitionSearchOptions &options = {})
+    {
+        SoiTransitionSearchResult out{};
+        out.from_primary_body_id = current_primary_body_id;
+        if (!kepler_arc_valid(arc) ||
+            current_primary_body_id == kInvalidBodyId ||
+            !std::isfinite(t_limit_s))
+        {
+            out.first_failure = KeplerStatus::InvalidInitialState;
+            return out;
+        }
+
+        const double arc_span_s = arc.t1_s - arc.t0_s;
+        const double requested_span_s = t_limit_s - arc.t0_s;
+        if (arc_span_s == 0.0 ||
+            requested_span_s == 0.0 ||
+            ((arc_span_s > 0.0) != (requested_span_s > 0.0)))
+        {
+            return out;
+        }
+        if (!soi_detail::has_other_soi_candidate_(sim, current_primary_body_id))
+        {
+            return out;
+        }
+
+        const double dir = arc_span_s > 0.0 ? 1.0 : -1.0;
+        const double max_abs_t_s = dir > 0.0 ? std::min(arc.t1_s, t_limit_s) : std::max(arc.t1_s, t_limit_s);
+        const double abs_duration_s = std::abs(max_abs_t_s - arc.t0_s);
+        if (!(abs_duration_s > 0.0) || !std::isfinite(abs_duration_s))
+        {
+            return out;
+        }
+
+        const double step_s = std::clamp(std::abs(options.max_step_s), 1.0e-6, abs_duration_s);
+        const double tolerance_s = std::clamp(std::abs(options.refine_tolerance_s), 1.0e-9, step_s);
+        const std::size_t max_steps = std::max<std::size_t>(1u, options.max_steps);
+
+        SoiSwitchOptions transition_switch = options.switch_options;
+        transition_switch.fallback_to_max_accel = false;
+
+        auto selected_primary_at = [&](const double t_s, KeplerStatus &status) -> BodyId {
+            const std::optional<Vec3> inertial_position_m =
+                    sample_kepler_arc_inertial_position_at(sim,
+                                                           eph,
+                                                           arc,
+                                                           t_s,
+                                                           options.propagation,
+                                                           &status);
+            if (!inertial_position_m.has_value())
+            {
+                return kInvalidBodyId;
+            }
+            return select_primary_body_id_rails(sim,
+                                                eph,
+                                                *inertial_position_m,
+                                                t_s,
+                                                current_primary_body_id,
+                                                transition_switch);
+        };
+
+        double prev_t_s = arc.t0_s;
+        KeplerStatus prev_status = KeplerStatus::Ok;
+        (void) selected_primary_at(prev_t_s, prev_status);
+        if (prev_status != KeplerStatus::Ok)
+        {
+            out.first_failure = prev_status;
+            return out;
+        }
+
+        for (std::size_t step_index = 1u; step_index <= max_steps; ++step_index)
+        {
+            const double offset_s = std::min(abs_duration_s, step_s * static_cast<double>(step_index));
+            const double t_s = arc.t0_s + dir * offset_s;
+            KeplerStatus sample_status = KeplerStatus::Ok;
+            const BodyId selected = selected_primary_at(t_s, sample_status);
+            ++out.tested_samples;
+            if (sample_status != KeplerStatus::Ok)
+            {
+                out.first_failure = sample_status;
+                return out;
+            }
+
+            if (selected != kInvalidBodyId && selected != current_primary_body_id)
+            {
+                double low_t_s = prev_t_s;
+                double high_t_s = t_s;
+                BodyId high_primary = selected;
+                for (int i = 0; i < 96 && std::abs(high_t_s - low_t_s) > tolerance_s; ++i)
+                {
+                    const double mid_t_s = 0.5 * (low_t_s + high_t_s);
+                    KeplerStatus mid_status = KeplerStatus::Ok;
+                    const BodyId mid_primary = selected_primary_at(mid_t_s, mid_status);
+                    ++out.tested_samples;
+                    if (mid_status != KeplerStatus::Ok)
+                    {
+                        out.first_failure = mid_status;
+                        return out;
+                    }
+                    if (mid_primary != kInvalidBodyId && mid_primary != current_primary_body_id)
+                    {
+                        high_t_s = mid_t_s;
+                        high_primary = mid_primary;
+                    }
+                    else
+                    {
+                        low_t_s = mid_t_s;
+                    }
+                }
+
+                out.found = true;
+                out.to_primary_body_id = high_primary;
+                out.t_s = high_t_s;
+                return out;
+            }
+
+            if (offset_s >= abs_duration_s)
+            {
+                break;
+            }
+            prev_t_s = t_s;
+        }
+
+        return out;
     }
 
 } // namespace orbitsim
