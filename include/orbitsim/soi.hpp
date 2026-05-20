@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <vector>
 
 namespace orbitsim
 {
@@ -497,6 +498,103 @@ namespace orbitsim
             return out;
         }
 
+        struct CachedBodyPosition
+        {
+            BodyId id{kInvalidBodyId};
+            const MassiveBody *body{nullptr};
+            bool ephemeris_index_valid{false};
+            std::size_t ephemeris_index{0u};
+            double soi_radius_m{0.0};
+        };
+
+        auto make_cached_body_position = [&](const BodyId body_id) {
+            CachedBodyPosition cached{};
+            cached.id = body_id;
+            cached.body = sim.body_by_id(body_id);
+            if (cached.body != nullptr)
+            {
+                cached.soi_radius_m = cached.body->soi_radius_m;
+            }
+            if (!eph.empty())
+            {
+                cached.ephemeris_index_valid = eph.body_index_for_id(body_id, &cached.ephemeris_index);
+            }
+            return cached;
+        };
+
+        auto body_position_at_cached = [&](const CachedBodyPosition &cached,
+                                           const double t_s,
+                                           Vec3 *out_pos_m) {
+            if (out_pos_m == nullptr || cached.body == nullptr)
+            {
+                return false;
+            }
+            if (!eph.empty())
+            {
+                if (!cached.ephemeris_index_valid)
+                {
+                    return false;
+                }
+                *out_pos_m = eph.body_position_at(cached.ephemeris_index, t_s);
+                return detail::finite3_(*out_pos_m);
+            }
+            *out_pos_m = cached.body->state.position_m;
+            return detail::finite3_(*out_pos_m);
+        };
+
+        auto distance_to_cached_body_m = [&](const CachedBodyPosition &cached,
+                                             const Vec3 &sc_pos_m,
+                                             const double t_s) -> std::optional<double> {
+            Vec3 body_pos_m{};
+            if (!body_position_at_cached(cached, t_s, &body_pos_m))
+            {
+                return std::nullopt;
+            }
+            const Vec3 dr = sc_pos_m - body_pos_m;
+            const double d2 = glm::dot(dr, dr);
+            if (!(d2 >= 0.0) || !std::isfinite(d2))
+            {
+                return std::nullopt;
+            }
+            return std::sqrt(d2);
+        };
+
+        const double enter_scale =
+                std::isfinite(options.switch_options.enter_scale)
+                        ? std::max(0.0, options.switch_options.enter_scale)
+                        : 0.0;
+        const double exit_scale =
+                std::isfinite(options.switch_options.exit_scale)
+                        ? std::max(0.0, options.switch_options.exit_scale)
+                        : 0.0;
+
+        std::vector<CachedBodyPosition> soi_bodies{};
+        soi_bodies.reserve(sim.massive_bodies().size());
+        bool has_other_soi_candidate = false;
+        for (const MassiveBody &body: sim.massive_bodies())
+        {
+            if (!(body.soi_radius_m > 0.0) || !std::isfinite(body.soi_radius_m))
+            {
+                continue;
+            }
+            CachedBodyPosition cached = make_cached_body_position(body.id);
+            if (cached.body == nullptr)
+            {
+                continue;
+            }
+            soi_bodies.push_back(cached);
+            has_other_soi_candidate = has_other_soi_candidate || (body.id != current_primary_body_id);
+        }
+        if (!has_other_soi_candidate)
+        {
+            return out;
+        }
+
+        const CachedBodyPosition primary_body = make_cached_body_position(arc.primary_body_id);
+        const CachedBodyPosition current_body = make_cached_body_position(current_primary_body_id);
+        const bool current_soi_valid =
+                current_body.soi_radius_m > 0.0 && std::isfinite(current_body.soi_radius_m);
+
         const double dir = arc_span_s > 0.0 ? 1.0 : -1.0;
         const double max_abs_t_s = dir > 0.0 ? std::min(arc.t1_s, t_limit_s) : std::max(arc.t1_s, t_limit_s);
         const double abs_duration_s = std::abs(max_abs_t_s - arc.t0_s);
@@ -509,27 +607,122 @@ namespace orbitsim
         const double tolerance_s = std::clamp(std::abs(options.refine_tolerance_s), 1.0e-9, step_s);
         const std::size_t max_steps = std::max<std::size_t>(1u, options.max_steps);
 
-        SoiSwitchOptions transition_switch = options.switch_options;
-        transition_switch.fallback_to_max_accel = false;
+        auto select_cached_primary_at = [&](const Vec3 &sc_pos_m, const double t_s) -> BodyId {
+            std::optional<std::size_t> best_index{};
+            double best_soi_m = 0.0;
+            double best_distance_m = 0.0;
+            double best_ratio = 0.0;
+
+            for (std::size_t i = 0; i < soi_bodies.size(); ++i)
+            {
+                const CachedBodyPosition &candidate = soi_bodies[i];
+                const double threshold_m = enter_scale * candidate.soi_radius_m;
+                const std::optional<double> distance_m =
+                        distance_to_cached_body_m(candidate, sc_pos_m, t_s);
+                if (!distance_m.has_value() || !(*distance_m <= threshold_m))
+                {
+                    continue;
+                }
+
+                const double ratio = candidate.soi_radius_m > 0.0
+                                             ? (*distance_m / candidate.soi_radius_m)
+                                             : std::numeric_limits<double>::infinity();
+                if (!best_index.has_value())
+                {
+                    best_index = i;
+                    best_soi_m = candidate.soi_radius_m;
+                    best_distance_m = *distance_m;
+                    best_ratio = ratio;
+                    continue;
+                }
+
+                if (options.switch_options.prefer_smallest_soi)
+                {
+                    if (candidate.soi_radius_m < best_soi_m ||
+                        (soi_detail::near_equal_(candidate.soi_radius_m, best_soi_m) &&
+                         *distance_m < best_distance_m))
+                    {
+                        best_index = i;
+                        best_soi_m = candidate.soi_radius_m;
+                        best_distance_m = *distance_m;
+                        best_ratio = ratio;
+                    }
+                }
+                else if (ratio < best_ratio ||
+                         (soi_detail::near_equal_(ratio, best_ratio) &&
+                          *distance_m < best_distance_m))
+                {
+                    best_index = i;
+                    best_soi_m = candidate.soi_radius_m;
+                    best_distance_m = *distance_m;
+                    best_ratio = ratio;
+                }
+            }
+
+            if (best_index.has_value())
+            {
+                const CachedBodyPosition &best = soi_bodies[*best_index];
+                if (best.id == current_primary_body_id)
+                {
+                    return current_primary_body_id;
+                }
+                if (current_soi_valid && best.soi_radius_m < current_body.soi_radius_m)
+                {
+                    return best.id;
+                }
+                if (!current_soi_valid)
+                {
+                    return best.id;
+                }
+
+                const std::optional<double> current_distance_m =
+                        distance_to_cached_body_m(current_body, sc_pos_m, t_s);
+                if (current_distance_m.has_value() &&
+                    *current_distance_m <= exit_scale * current_body.soi_radius_m)
+                {
+                    return current_primary_body_id;
+                }
+                return best.id;
+            }
+
+            if (current_soi_valid)
+            {
+                const std::optional<double> current_distance_m =
+                        distance_to_cached_body_m(current_body, sc_pos_m, t_s);
+                if (current_distance_m.has_value() &&
+                    *current_distance_m <= exit_scale * current_body.soi_radius_m)
+                {
+                    return current_primary_body_id;
+                }
+            }
+
+            return kInvalidBodyId;
+        };
 
         auto selected_primary_at = [&](const double t_s, KeplerStatus &status) -> BodyId {
-            const std::optional<Vec3> inertial_position_m =
-                    sample_kepler_arc_inertial_position_at(sim,
-                                                           eph,
-                                                           arc,
-                                                           t_s,
-                                                           options.propagation,
-                                                           &status);
-            if (!inertial_position_m.has_value())
+            const KeplerArcSample sample = sample_kepler_arc_state(arc, t_s, options.propagation);
+            if (!sample.ok())
             {
+                status = sample.diagnostics.status;
                 return kInvalidBodyId;
             }
-            return select_primary_body_id_rails(sim,
-                                                eph,
-                                                *inertial_position_m,
-                                                t_s,
-                                                current_primary_body_id,
-                                                transition_switch);
+
+            Vec3 primary_pos_m{};
+            if (!body_position_at_cached(primary_body, t_s, &primary_pos_m))
+            {
+                status = KeplerStatus::InvalidFinalState;
+                return kInvalidBodyId;
+            }
+
+            const Vec3 inertial_position_m = primary_pos_m + sample.state_relative.position_m;
+            if (!detail::finite3_(inertial_position_m))
+            {
+                status = KeplerStatus::InvalidFinalState;
+                return kInvalidBodyId;
+            }
+
+            status = KeplerStatus::Ok;
+            return select_cached_primary_at(inertial_position_m, t_s);
         };
 
         double prev_t_s = arc.t0_s;
