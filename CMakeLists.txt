@@ -21,6 +21,7 @@ endif ()
 
 add_library(orbitsim INTERFACE
         include/orbitsim/kepler.hpp
+        include/orbitsim/kepler_events.hpp
         include/orbitsim/kepler_trajectory.hpp
         include/orbitsim/kepler_maneuver.hpp
         include/orbitsim/lambert.hpp)
