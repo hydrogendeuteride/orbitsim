@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <vector>
 
 namespace orbitsim
@@ -50,6 +51,28 @@ namespace orbitsim
         double min_inclination_rad{1.0e-6};
         double near_parabolic_epsilon{1.0e-8};
         double time_epsilon_s{1.0e-6};
+        KeplerPropagationOptions propagation{};
+    };
+
+    enum class KeplerRadiusCrossingKind : uint8_t
+    {
+        Enter,
+        Exit,
+    };
+
+    struct KeplerRadiusCrossingEvent
+    {
+        KeplerRadiusCrossingKind kind{KeplerRadiusCrossingKind::Enter};
+        double t_s{0.0};
+        State state_relative{};
+        double radius_m{0.0};
+    };
+
+    struct KeplerRadiusCrossingOptions
+    {
+        double max_step_s{300.0};
+        double refine_tolerance_s{0.25};
+        double distance_tolerance_m{0.01};
         KeplerPropagationOptions propagation{};
     };
 
@@ -115,6 +138,31 @@ namespace orbitsim
                     .state_relative = sample.state_relative,
             });
             return true;
+        }
+
+        inline double radius_delta_m_(const KeplerArc &arc,
+                                      const double t_s,
+                                      const double radius_m,
+                                      const KeplerPropagationOptions &propagation)
+        {
+            const KeplerArcSample sample = sample_kepler_arc_state(arc, t_s, propagation);
+            if (!sample.ok() || !kepler_finite3_(sample.state_relative.position_m))
+            {
+                return std::numeric_limits<double>::quiet_NaN();
+            }
+            return glm::length(sample.state_relative.position_m) - radius_m;
+        }
+
+        inline bool radius_crossed_(const double a,
+                                    const double b,
+                                    const double tolerance_m)
+        {
+            if (!std::isfinite(a) || !std::isfinite(b))
+            {
+                return false;
+            }
+            const double eps = std::max(0.0, tolerance_m);
+            return (a > eps && b <= eps) || (a < -eps && b >= -eps);
         }
     } // namespace detail
 
@@ -327,5 +375,101 @@ namespace orbitsim
                       return a.t_s < b.t_s;
                   });
         return out;
+    }
+
+    inline std::optional<KeplerRadiusCrossingEvent> find_next_kepler_radius_crossing(
+            const KeplerArc &arc,
+            const double radius_m,
+            const double t_limit_s,
+            const KeplerRadiusCrossingOptions &options = {})
+    {
+        if (!kepler_arc_valid(arc) ||
+            !(radius_m > 0.0) ||
+            !std::isfinite(radius_m) ||
+            !std::isfinite(t_limit_s) ||
+            t_limit_s <= arc.t0_s)
+        {
+            return std::nullopt;
+        }
+
+        const double t_end_s = std::min(t_limit_s, arc.t1_s);
+        if (!std::isfinite(t_end_s) || t_end_s <= arc.t0_s)
+        {
+            return std::nullopt;
+        }
+
+        const double max_step_s = std::max(1.0e-6, options.max_step_s);
+        const double refine_tolerance_s = std::max(0.0, options.refine_tolerance_s);
+        const double distance_tolerance_m = std::max(0.0, options.distance_tolerance_m);
+
+        double t0_s = arc.t0_s;
+        double f0 = detail::radius_delta_m_(arc, t0_s, radius_m, options.propagation);
+        if (!std::isfinite(f0))
+        {
+            return std::nullopt;
+        }
+
+        while (t0_s < t_end_s)
+        {
+            const double t1_s = std::min(t_end_s, t0_s + max_step_s);
+            const double f1 = detail::radius_delta_m_(arc, t1_s, radius_m, options.propagation);
+            if (!std::isfinite(f1))
+            {
+                return std::nullopt;
+            }
+
+            if (detail::radius_crossed_(f0, f1, distance_tolerance_m))
+            {
+                const KeplerRadiusCrossingKind kind =
+                        f0 > f1 ? KeplerRadiusCrossingKind::Enter : KeplerRadiusCrossingKind::Exit;
+                double a_s = t0_s;
+                double b_s = t1_s;
+                double fa = f0;
+                for (int i = 0; i < 64; ++i)
+                {
+                    const double mid_s = 0.5 * (a_s + b_s);
+                    const double fm = detail::radius_delta_m_(arc, mid_s, radius_m, options.propagation);
+                    if (!std::isfinite(fm))
+                    {
+                        break;
+                    }
+                    if (std::abs(b_s - a_s) <= refine_tolerance_s ||
+                        std::abs(fm) <= distance_tolerance_m)
+                    {
+                        a_s = mid_s;
+                        b_s = mid_s;
+                        break;
+                    }
+                    if ((fa > 0.0 && fm <= 0.0) || (fa < 0.0 && fm >= 0.0))
+                    {
+                        b_s = mid_s;
+                    }
+                    else
+                    {
+                        a_s = mid_s;
+                        fa = fm;
+                    }
+                }
+
+                const double event_t_s = 0.5 * (a_s + b_s);
+                const KeplerArcSample sample =
+                        sample_kepler_arc_state(arc, event_t_s, options.propagation);
+                if (!sample.ok() || !detail::kepler_finite3_(sample.state_relative.position_m))
+                {
+                    return std::nullopt;
+                }
+                return KeplerRadiusCrossingEvent{
+                        .kind = kind,
+                        .t_s = sample.t_s,
+                        .state_relative = sample.state_relative,
+                        .radius_m = glm::length(sample.state_relative.position_m),
+                };
+            }
+
+            t0_s = t1_s;
+            f0 = f1;
+        }
+
+        return std::nullopt;
     }
 } // namespace orbitsim
