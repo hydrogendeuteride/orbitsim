@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <vector>
@@ -73,6 +74,23 @@ namespace orbitsim
         double max_step_s{300.0};
         double refine_tolerance_s{0.25};
         double distance_tolerance_m{0.01};
+        KeplerPropagationOptions propagation{};
+    };
+
+    struct KeplerClosestApproachEvent
+    {
+        double t_s{0.0};
+        State subject_state_relative{};
+        State subject_state_inertial{};
+        State target_state_inertial{};
+        BodyId target_body_id{kInvalidBodyId};
+        double separation_m{0.0};
+    };
+
+    struct KeplerClosestApproachOptions
+    {
+        double max_step_s{300.0};
+        double refine_tolerance_s{0.25};
         KeplerPropagationOptions propagation{};
     };
 
@@ -471,5 +489,338 @@ namespace orbitsim
         }
 
         return std::nullopt;
+    }
+
+    inline std::vector<KeplerRadiusCrossingEvent> find_kepler_radius_crossings(
+            const KeplerArc &arc,
+            const double radius_m,
+            const double t_limit_s,
+            const KeplerRadiusCrossingOptions &options = {})
+    {
+        std::vector<KeplerRadiusCrossingEvent> out{};
+        if (!kepler_arc_valid(arc) ||
+            !(radius_m > 0.0) ||
+            !std::isfinite(radius_m) ||
+            !std::isfinite(t_limit_s) ||
+            t_limit_s <= arc.t0_s)
+        {
+            return out;
+        }
+
+        const double t_end_s = std::min(t_limit_s, arc.t1_s);
+        if (!std::isfinite(t_end_s) || t_end_s <= arc.t0_s)
+        {
+            return out;
+        }
+
+        const double max_step_s = std::max(1.0e-6, options.max_step_s);
+        const double refine_tolerance_s = std::max(0.0, options.refine_tolerance_s);
+        const double distance_tolerance_m = std::max(0.0, options.distance_tolerance_m);
+        const double nudge_s = std::max(1.0e-6, refine_tolerance_s);
+
+        double t0_s = arc.t0_s;
+        double f0 = detail::radius_delta_m_(arc, t0_s, radius_m, options.propagation);
+        if (!std::isfinite(f0))
+        {
+            return out;
+        }
+
+        while (t0_s < t_end_s)
+        {
+            const double t1_s = std::min(t_end_s, t0_s + max_step_s);
+            const double f1 = detail::radius_delta_m_(arc, t1_s, radius_m, options.propagation);
+            if (!std::isfinite(f1))
+            {
+                break;
+            }
+
+            if (detail::radius_crossed_(f0, f1, distance_tolerance_m))
+            {
+                const KeplerRadiusCrossingKind kind =
+                        f0 > f1 ? KeplerRadiusCrossingKind::Enter : KeplerRadiusCrossingKind::Exit;
+                double a_s = t0_s;
+                double b_s = t1_s;
+                double fa = f0;
+                for (int i = 0; i < 64; ++i)
+                {
+                    const double mid_s = 0.5 * (a_s + b_s);
+                    const double fm = detail::radius_delta_m_(arc, mid_s, radius_m, options.propagation);
+                    if (!std::isfinite(fm))
+                    {
+                        break;
+                    }
+                    if (std::abs(b_s - a_s) <= refine_tolerance_s ||
+                        std::abs(fm) <= distance_tolerance_m)
+                    {
+                        a_s = mid_s;
+                        b_s = mid_s;
+                        break;
+                    }
+                    if ((fa > 0.0 && fm <= 0.0) || (fa < 0.0 && fm >= 0.0))
+                    {
+                        b_s = mid_s;
+                    }
+                    else
+                    {
+                        a_s = mid_s;
+                        fa = fm;
+                    }
+                }
+
+                const double event_t_s = 0.5 * (a_s + b_s);
+                const KeplerArcSample sample =
+                        sample_kepler_arc_state(arc, event_t_s, options.propagation);
+                if (!sample.ok() || !detail::kepler_finite3_(sample.state_relative.position_m))
+                {
+                    break;
+                }
+
+                out.push_back(KeplerRadiusCrossingEvent{
+                        .kind = kind,
+                        .t_s = sample.t_s,
+                        .state_relative = sample.state_relative,
+                        .radius_m = glm::length(sample.state_relative.position_m),
+                });
+
+                t0_s = std::min(t_end_s, event_t_s + nudge_s);
+                f0 = detail::radius_delta_m_(arc, t0_s, radius_m, options.propagation);
+                if (!std::isfinite(f0))
+                {
+                    break;
+                }
+                continue;
+            }
+
+            t0_s = t1_s;
+            f0 = f1;
+        }
+
+        return out;
+    }
+
+    inline std::optional<KeplerClosestApproachEvent> find_kepler_closest_approach_to_state_on_arc(
+            const KeplerArc &arc,
+            const std::function<bool(double, State &)> &primary_state_at,
+            const std::function<bool(double, State &)> &target_state_at,
+            const double t_limit_s,
+            const KeplerClosestApproachOptions &options = {})
+    {
+        if (!kepler_arc_valid(arc) ||
+            !primary_state_at ||
+            !target_state_at ||
+            !std::isfinite(t_limit_s) ||
+            t_limit_s <= arc.t0_s)
+        {
+            return std::nullopt;
+        }
+
+        const double t_end_s = std::min(t_limit_s, arc.t1_s);
+        if (!std::isfinite(t_end_s) || t_end_s <= arc.t0_s)
+        {
+            return std::nullopt;
+        }
+
+        auto sample_sep2 = [&](const double t_s,
+                               State *subject_relative,
+                               State *subject_inertial,
+                               State *target_inertial) {
+            const KeplerArcSample sample =
+                    sample_kepler_arc_state(arc, t_s, options.propagation);
+            if (!sample.ok() ||
+                !detail::kepler_finite3_(sample.state_relative.position_m) ||
+                !detail::kepler_finite3_(sample.state_relative.velocity_mps))
+            {
+                return std::numeric_limits<double>::quiet_NaN();
+            }
+
+            State primary_state{};
+            State target_state{};
+            if (!primary_state_at(t_s, primary_state) ||
+                !target_state_at(t_s, target_state) ||
+                !detail::kepler_finite3_(primary_state.position_m) ||
+                !detail::kepler_finite3_(primary_state.velocity_mps) ||
+                !detail::kepler_finite3_(target_state.position_m))
+            {
+                return std::numeric_limits<double>::quiet_NaN();
+            }
+
+            State inertial = sample.state_relative;
+            inertial.position_m += primary_state.position_m;
+            inertial.velocity_mps += primary_state.velocity_mps;
+            if (!detail::kepler_finite3_(inertial.position_m) ||
+                !detail::kepler_finite3_(inertial.velocity_mps))
+            {
+                return std::numeric_limits<double>::quiet_NaN();
+            }
+
+            const Vec3 delta = inertial.position_m - target_state.position_m;
+            const double sep2 = glm::dot(delta, delta);
+            if (!(sep2 >= 0.0) || !std::isfinite(sep2))
+            {
+                return std::numeric_limits<double>::quiet_NaN();
+            }
+
+            if (subject_relative)
+            {
+                *subject_relative = sample.state_relative;
+            }
+            if (subject_inertial)
+            {
+                *subject_inertial = inertial;
+            }
+            if (target_inertial)
+            {
+                *target_inertial = target_state;
+            }
+            return sep2;
+        };
+
+        const double max_step_s = std::max(1.0e-6, options.max_step_s);
+        double best_t_s = arc.t0_s;
+        double best_sep2 = std::numeric_limits<double>::infinity();
+        double best_prev_t_s = arc.t0_s;
+        double best_next_t_s = std::min(t_end_s, arc.t0_s + max_step_s);
+
+        double prev_t_s = arc.t0_s;
+        double prev_sep2 = sample_sep2(prev_t_s, nullptr, nullptr, nullptr);
+        if (!std::isfinite(prev_sep2))
+        {
+            return std::nullopt;
+        }
+        best_sep2 = prev_sep2;
+
+        while (prev_t_s < t_end_s)
+        {
+            const double t_s = std::min(t_end_s, prev_t_s + max_step_s);
+            const double sep2 = sample_sep2(t_s, nullptr, nullptr, nullptr);
+            if (!std::isfinite(sep2))
+            {
+                return std::nullopt;
+            }
+            if (sep2 < best_sep2)
+            {
+                best_t_s = t_s;
+                best_sep2 = sep2;
+                best_prev_t_s = prev_t_s;
+                best_next_t_s = std::min(t_end_s, t_s + max_step_s);
+            }
+            prev_t_s = t_s;
+            prev_sep2 = sep2;
+            (void) prev_sep2;
+        }
+
+        double a_s = std::max(arc.t0_s, best_prev_t_s);
+        double b_s = std::min(t_end_s, best_next_t_s);
+        if (b_s < a_s)
+        {
+            std::swap(a_s, b_s);
+        }
+
+        const double tolerance_s = std::max(0.0, options.refine_tolerance_s);
+        constexpr double kInvPhi = 0.6180339887498948482;
+        constexpr double kInvPhi2 = 0.3819660112501051518;
+        double c_s = a_s + kInvPhi2 * (b_s - a_s);
+        double d_s = a_s + kInvPhi * (b_s - a_s);
+        double fc = sample_sep2(c_s, nullptr, nullptr, nullptr);
+        double fd = sample_sep2(d_s, nullptr, nullptr, nullptr);
+        if (!std::isfinite(fc) || !std::isfinite(fd))
+        {
+            return std::nullopt;
+        }
+
+        for (int i = 0; i < 64 && std::abs(b_s - a_s) > tolerance_s; ++i)
+        {
+            if (fc < fd)
+            {
+                b_s = d_s;
+                d_s = c_s;
+                fd = fc;
+                c_s = a_s + kInvPhi2 * (b_s - a_s);
+                fc = sample_sep2(c_s, nullptr, nullptr, nullptr);
+            }
+            else
+            {
+                a_s = c_s;
+                c_s = d_s;
+                fc = fd;
+                d_s = a_s + kInvPhi * (b_s - a_s);
+                fd = sample_sep2(d_s, nullptr, nullptr, nullptr);
+            }
+            if (!std::isfinite(fc) || !std::isfinite(fd))
+            {
+                return std::nullopt;
+            }
+        }
+
+        const double candidates[5]{
+                arc.t0_s,
+                t_end_s,
+                best_t_s,
+                c_s,
+                d_s,
+        };
+        for (const double t_s : candidates)
+        {
+            if (t_s < arc.t0_s || t_s > t_end_s)
+            {
+                continue;
+            }
+            const double sep2 = sample_sep2(t_s, nullptr, nullptr, nullptr);
+            if (std::isfinite(sep2) && sep2 < best_sep2)
+            {
+                best_sep2 = sep2;
+                best_t_s = t_s;
+            }
+        }
+
+        State subject_relative{};
+        State subject_inertial{};
+        State target_inertial{};
+        const double sep2 = sample_sep2(best_t_s,
+                                        &subject_relative,
+                                        &subject_inertial,
+                                        &target_inertial);
+        if (!std::isfinite(sep2))
+        {
+            return std::nullopt;
+        }
+
+        return KeplerClosestApproachEvent{
+                .t_s = best_t_s,
+                .subject_state_relative = subject_relative,
+                .subject_state_inertial = subject_inertial,
+                .target_state_inertial = target_inertial,
+                .separation_m = std::sqrt(std::max(0.0, sep2)),
+        };
+    }
+
+    inline std::optional<KeplerClosestApproachEvent> find_kepler_closest_approach_on_arc(
+            const KeplerArc &arc,
+            const BodyId target_body_id,
+            const std::function<bool(BodyId, double, State &)> &state_at,
+            const double t_limit_s,
+            const KeplerClosestApproachOptions &options = {})
+    {
+        if (target_body_id == kInvalidBodyId || !state_at)
+        {
+            return std::nullopt;
+        }
+
+        std::optional<KeplerClosestApproachEvent> event =
+                find_kepler_closest_approach_to_state_on_arc(
+                        arc,
+                        [&](const double t_s, State &out_state) {
+                            return state_at(arc.primary_body_id, t_s, out_state);
+                        },
+                        [&](const double t_s, State &out_state) {
+                            return state_at(target_body_id, t_s, out_state);
+                        },
+                        t_limit_s,
+                        options);
+        if (event.has_value())
+        {
+            event->target_body_id = target_body_id;
+        }
+        return event;
     }
 } // namespace orbitsim
