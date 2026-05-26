@@ -182,6 +182,341 @@ namespace orbitsim
             const double eps = std::max(0.0, tolerance_m);
             return (a > eps && b <= eps) || (a < -eps && b >= -eps);
         }
+
+        inline KeplerRadiusCrossingKind radius_crossing_kind_(const State &state)
+        {
+            const double radial_speed_mps =
+                    glm::dot(state.position_m, state.velocity_mps);
+            return radial_speed_mps < 0.0 ? KeplerRadiusCrossingKind::Enter
+                                          : KeplerRadiusCrossingKind::Exit;
+        }
+
+        inline bool push_radius_crossing_event_(std::vector<KeplerRadiusCrossingEvent> &out,
+                                                const KeplerArc &arc,
+                                                const double t_s,
+                                                const KeplerPropagationOptions &propagation)
+        {
+            const KeplerArcSample sample = sample_kepler_arc_state(arc, t_s, propagation);
+            if (!sample.ok() ||
+                !kepler_finite3_(sample.state_relative.position_m) ||
+                !kepler_finite3_(sample.state_relative.velocity_mps))
+            {
+                return false;
+            }
+
+            const double radius_m = glm::length(sample.state_relative.position_m);
+            if (!(radius_m > 0.0) || !std::isfinite(radius_m))
+            {
+                return false;
+            }
+
+            out.push_back(KeplerRadiusCrossingEvent{
+                    .kind = radius_crossing_kind_(sample.state_relative),
+                    .t_s = sample.t_s,
+                    .state_relative = sample.state_relative,
+                    .radius_m = radius_m,
+            });
+            return true;
+        }
+
+        inline double signed_true_anomaly_(const double true_anomaly_rad)
+        {
+            const double two_pi = 2.0 * std::acos(-1.0);
+            double nu = wrap_angle_0_2pi(true_anomaly_rad);
+            if (nu > std::acos(-1.0))
+            {
+                nu -= two_pi;
+            }
+            return nu;
+        }
+
+        inline double parabolic_barker_value_(const double true_anomaly_rad)
+        {
+            const double d = std::tan(0.5 * signed_true_anomaly_(true_anomaly_rad));
+            return d + (d * d * d) / 3.0;
+        }
+
+        inline double refine_radius_crossing_time_(const KeplerArc &arc,
+                                                   const double radius_m,
+                                                   const double t_guess_s,
+                                                   const double t_min_s,
+                                                   const double t_max_s,
+                                                   const KeplerRadiusCrossingOptions &options)
+        {
+            if (!std::isfinite(t_guess_s) ||
+                !std::isfinite(t_min_s) ||
+                !std::isfinite(t_max_s) ||
+                !(t_max_s >= t_min_s))
+            {
+                return t_guess_s;
+            }
+
+            double t_s = std::clamp(t_guess_s, t_min_s, t_max_s);
+            const double distance_tolerance_m = std::max(0.0, options.distance_tolerance_m);
+            const double time_tolerance_s = std::max(0.0, options.refine_tolerance_s);
+            const double span_s = std::max(1.0e-9, t_max_s - t_min_s);
+            for (int i = 0; i < 8; ++i)
+            {
+                const KeplerArcSample sample =
+                        sample_kepler_arc_state(arc, t_s, options.propagation);
+                if (!sample.ok() ||
+                    !kepler_finite3_(sample.state_relative.position_m) ||
+                    !kepler_finite3_(sample.state_relative.velocity_mps))
+                {
+                    break;
+                }
+
+                const double r_m = glm::length(sample.state_relative.position_m);
+                if (!(r_m > 0.0) || !std::isfinite(r_m))
+                {
+                    break;
+                }
+
+                const double delta_m = r_m - radius_m;
+                if (std::abs(delta_m) <= distance_tolerance_m)
+                {
+                    break;
+                }
+
+                const double radial_speed_mps =
+                        glm::dot(sample.state_relative.position_m,
+                                 sample.state_relative.velocity_mps) /
+                        r_m;
+                if (!(std::abs(radial_speed_mps) > 0.0) ||
+                    !std::isfinite(radial_speed_mps))
+                {
+                    break;
+                }
+
+                const double step_s = std::clamp(delta_m / radial_speed_mps,
+                                                 -0.25 * span_s,
+                                                 0.25 * span_s);
+                const double next_t_s = std::clamp(t_s - step_s, t_min_s, t_max_s);
+                if (std::abs(next_t_s - t_s) <= time_tolerance_s)
+                {
+                    t_s = next_t_s;
+                    break;
+                }
+                t_s = next_t_s;
+            }
+            return t_s;
+        }
+
+        inline std::vector<KeplerRadiusCrossingEvent> radius_crossings_near_parabolic_(
+                const KeplerArc &arc,
+                const OrbitalElements &elements,
+                const double radius_m,
+                const double t_end_s,
+                const KeplerRadiusCrossingOptions &options)
+        {
+            std::vector<KeplerRadiusCrossingEvent> out{};
+            const Vec3 h_vec = glm::cross(arc.state0_relative.position_m,
+                                          arc.state0_relative.velocity_mps);
+            const double h2 = glm::dot(h_vec, h_vec);
+            if (!(h2 > 0.0) ||
+                !std::isfinite(h2) ||
+                !(arc.mu_m3_s2 > 0.0) ||
+                !std::isfinite(arc.mu_m3_s2))
+            {
+                return out;
+            }
+
+            const double p_m = h2 / arc.mu_m3_s2;
+            const double q_m = 0.5 * p_m;
+            if (!(q_m > 0.0) || !std::isfinite(q_m) || radius_m < q_m)
+            {
+                return out;
+            }
+
+            const double e = elements.eccentricity;
+            if (!(e > 0.0) || !std::isfinite(e))
+            {
+                return out;
+            }
+
+            const double cos_nu = (p_m / radius_m - 1.0) / e;
+            constexpr double kCosEps = 1.0e-12;
+            if (cos_nu < -1.0 - kCosEps || cos_nu > 1.0 + kCosEps)
+            {
+                return out;
+            }
+
+            const double clamped_cos_nu = std::clamp(cos_nu, -1.0, 1.0);
+            const double nu0 = std::acos(clamped_cos_nu);
+            const double true_anomalies[2]{-nu0, nu0};
+            const double b0 = parabolic_barker_value_(elements.true_anomaly_rad);
+            const double time_scale_s = std::sqrt((2.0 * q_m * q_m * q_m) / arc.mu_m3_s2);
+            if (!std::isfinite(b0) ||
+                !(time_scale_s > 0.0) ||
+                !std::isfinite(time_scale_s))
+            {
+                return out;
+            }
+
+            const double min_event_t_s =
+                    arc.t0_s + std::max(1.0e-9, std::max(0.0, options.refine_tolerance_s) * 1.0e-6);
+            for (const double true_anomaly_rad : true_anomalies)
+            {
+                const double b = parabolic_barker_value_(true_anomaly_rad);
+                if (!std::isfinite(b))
+                {
+                    continue;
+                }
+
+                double t_s = arc.t0_s + (b - b0) * time_scale_s;
+                if (t_s <= min_event_t_s || t_s > t_end_s + 1.0e-9)
+                {
+                    continue;
+                }
+
+                t_s = refine_radius_crossing_time_(arc,
+                                                   radius_m,
+                                                   t_s,
+                                                   min_event_t_s,
+                                                   t_end_s,
+                                                   options);
+                (void) push_radius_crossing_event_(out, arc, t_s, options.propagation);
+            }
+
+            std::sort(out.begin(),
+                      out.end(),
+                      [](const KeplerRadiusCrossingEvent &a, const KeplerRadiusCrossingEvent &b) {
+                          if (a.t_s == b.t_s)
+                          {
+                              return static_cast<uint8_t>(a.kind) <
+                                     static_cast<uint8_t>(b.kind);
+                          }
+                          return a.t_s < b.t_s;
+                      });
+            out.erase(std::unique(out.begin(),
+                                  out.end(),
+                                  [](const KeplerRadiusCrossingEvent &a,
+                                     const KeplerRadiusCrossingEvent &b) {
+                                      return std::abs(a.t_s - b.t_s) <= 1.0e-6;
+                                  }),
+                      out.end());
+            return out;
+        }
+
+        inline std::vector<KeplerRadiusCrossingEvent> radius_crossings_from_anomaly_(
+                const KeplerArc &arc,
+                const double radius_m,
+                const double t_end_s,
+                const KeplerRadiusCrossingOptions &options)
+        {
+            std::vector<KeplerRadiusCrossingEvent> out{};
+            const OrbitalElements elements =
+                    orbital_elements_from_relative_state(arc.mu_m3_s2,
+                                                         arc.state0_relative.position_m,
+                                                         arc.state0_relative.velocity_mps);
+            const double e = elements.eccentricity;
+            const double a = elements.semi_major_axis_m;
+            if (!(e > 1.0e-12) || !std::isfinite(e))
+            {
+                return out;
+            }
+            if (std::abs(e - 1.0) <= 1.0e-8)
+            {
+                return radius_crossings_near_parabolic_(arc, elements, radius_m, t_end_s, options);
+            }
+            if (!std::isfinite(a) || !std::isfinite(elements.mean_anomaly_rad))
+            {
+                return out;
+            }
+
+            const double p_m = a * (1.0 - e * e);
+            if (!(p_m > 0.0) || !std::isfinite(p_m))
+            {
+                return out;
+            }
+
+            const double cos_nu = (p_m / radius_m - 1.0) / e;
+            constexpr double kCosEps = 1.0e-12;
+            if (cos_nu < -1.0 - kCosEps || cos_nu > 1.0 + kCosEps)
+            {
+                return out;
+            }
+
+            const double clamped_cos_nu = std::clamp(cos_nu, -1.0, 1.0);
+            const double nu0 = std::acos(clamped_cos_nu);
+            const double two_pi = 2.0 * std::acos(-1.0);
+            const double true_anomalies[2]{nu0, two_pi - nu0};
+            const double min_event_t_s =
+                    arc.t0_s + std::max(1.0e-9, std::max(0.0, options.refine_tolerance_s) * 1.0e-6);
+            const double abs_a = std::abs(a);
+            const double mean_motion_radps =
+                    std::sqrt(arc.mu_m3_s2 / (abs_a * abs_a * abs_a));
+            if (!(mean_motion_radps > 0.0) || !std::isfinite(mean_motion_radps))
+            {
+                return out;
+            }
+
+            for (const double true_anomaly_rad : true_anomalies)
+            {
+                const KeplerAnomalyResult anomaly =
+                        kepler_anomalies_from_true_anomaly(e, true_anomaly_rad);
+                if (!anomaly.valid || !std::isfinite(anomaly.mean_anomaly_rad))
+                {
+                    continue;
+                }
+
+                if (e < 1.0)
+                {
+                    double dM = wrap_angle_0_2pi(anomaly.mean_anomaly_rad -
+                                                 elements.mean_anomaly_rad);
+                    if (std::abs(dM) <= 1.0e-12)
+                    {
+                        dM = 0.0;
+                    }
+                    const double period_s = two_pi / mean_motion_radps;
+                    if (!(period_s > 0.0) || !std::isfinite(period_s))
+                    {
+                        continue;
+                    }
+
+                    double t_s = arc.t0_s + dM / mean_motion_radps;
+                    while (t_s <= min_event_t_s)
+                    {
+                        t_s += period_s;
+                    }
+                    for (; t_s <= t_end_s + 1.0e-9; t_s += period_s)
+                    {
+                        if (!push_radius_crossing_event_(out, arc, t_s, options.propagation))
+                        {
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    const double dM = anomaly.mean_anomaly_rad - elements.mean_anomaly_rad;
+                    const double t_s = arc.t0_s + dM / mean_motion_radps;
+                    if (t_s > min_event_t_s && t_s <= t_end_s + 1.0e-9)
+                    {
+                        (void) push_radius_crossing_event_(out, arc, t_s, options.propagation);
+                    }
+                }
+            }
+
+            std::sort(out.begin(),
+                      out.end(),
+                      [](const KeplerRadiusCrossingEvent &a, const KeplerRadiusCrossingEvent &b) {
+                          if (a.t_s == b.t_s)
+                          {
+                              return static_cast<uint8_t>(a.kind) <
+                                     static_cast<uint8_t>(b.kind);
+                          }
+                          return a.t_s < b.t_s;
+                      });
+            out.erase(std::unique(out.begin(),
+                                  out.end(),
+                                  [](const KeplerRadiusCrossingEvent &a,
+                                     const KeplerRadiusCrossingEvent &b) {
+                                      return std::abs(a.t_s - b.t_s) <= 1.0e-6;
+                                  }),
+                      out.end());
+            return out;
+        }
     } // namespace detail
 
     inline std::vector<KeplerApsisEvent> find_kepler_apsis_events(
@@ -420,6 +755,13 @@ namespace orbitsim
         const double refine_tolerance_s = std::max(0.0, options.refine_tolerance_s);
         const double distance_tolerance_m = std::max(0.0, options.distance_tolerance_m);
 
+        const std::vector<KeplerRadiusCrossingEvent> anomaly_events =
+                detail::radius_crossings_from_anomaly_(arc, radius_m, t_end_s, options);
+        if (!anomaly_events.empty())
+        {
+            return anomaly_events.front();
+        }
+
         double t0_s = arc.t0_s;
         double f0 = detail::radius_delta_m_(arc, t0_s, radius_m, options.propagation);
         if (!std::isfinite(f0))
@@ -517,6 +859,13 @@ namespace orbitsim
         const double refine_tolerance_s = std::max(0.0, options.refine_tolerance_s);
         const double distance_tolerance_m = std::max(0.0, options.distance_tolerance_m);
         const double nudge_s = std::max(1.0e-6, refine_tolerance_s);
+
+        std::vector<KeplerRadiusCrossingEvent> anomaly_events =
+                detail::radius_crossings_from_anomaly_(arc, radius_m, t_end_s, options);
+        if (!anomaly_events.empty())
+        {
+            return anomaly_events;
+        }
 
         double t0_s = arc.t0_s;
         double f0 = detail::radius_delta_m_(arc, t0_s, radius_m, options.propagation);
@@ -682,30 +1031,104 @@ namespace orbitsim
         double best_next_t_s = std::min(t_end_s, arc.t0_s + max_step_s);
 
         double prev_t_s = arc.t0_s;
-        double prev_sep2 = sample_sep2(prev_t_s, nullptr, nullptr, nullptr);
+        State prev_subject_inertial{};
+        State prev_target_inertial{};
+        double prev_sep2 = sample_sep2(prev_t_s,
+                                       nullptr,
+                                       &prev_subject_inertial,
+                                       &prev_target_inertial);
         if (!std::isfinite(prev_sep2))
         {
             return std::nullopt;
         }
         best_sep2 = prev_sep2;
 
+        auto consider_best = [&](const double t_s,
+                                 const double sep2,
+                                 const double low_t_s,
+                                 const double high_t_s) {
+            if (std::isfinite(sep2) && sep2 < best_sep2)
+            {
+                best_t_s = t_s;
+                best_sep2 = sep2;
+                best_prev_t_s = std::max(arc.t0_s, low_t_s);
+                best_next_t_s = std::min(t_end_s, high_t_s);
+            }
+        };
+
         while (prev_t_s < t_end_s)
         {
             const double t_s = std::min(t_end_s, prev_t_s + max_step_s);
-            const double sep2 = sample_sep2(t_s, nullptr, nullptr, nullptr);
+            State subject_inertial{};
+            State target_inertial{};
+            const double sep2 = sample_sep2(t_s,
+                                            nullptr,
+                                            &subject_inertial,
+                                            &target_inertial);
             if (!std::isfinite(sep2))
             {
                 return std::nullopt;
             }
-            if (sep2 < best_sep2)
+
+            consider_best(t_s, sep2, prev_t_s, std::min(t_end_s, t_s + max_step_s));
+
+            const double dt_s = t_s - prev_t_s;
+            if (dt_s > 0.0)
             {
-                best_t_s = t_s;
-                best_sep2 = sep2;
-                best_prev_t_s = prev_t_s;
-                best_next_t_s = std::min(t_end_s, t_s + max_step_s);
+                const Vec3 prev_delta =
+                        prev_subject_inertial.position_m - prev_target_inertial.position_m;
+                const Vec3 next_delta =
+                        subject_inertial.position_m - target_inertial.position_m;
+                Vec3 rel_vel_mps =
+                        prev_subject_inertial.velocity_mps - prev_target_inertial.velocity_mps;
+                if (!detail::kepler_finite3_(rel_vel_mps))
+                {
+                    rel_vel_mps = (next_delta - prev_delta) / dt_s;
+                }
+
+                double probe_t_s = 0.5 * (prev_t_s + t_s);
+                if (detail::kepler_finite3_(prev_delta) &&
+                    detail::kepler_finite3_(rel_vel_mps))
+                {
+                    const double speed2 = glm::dot(rel_vel_mps, rel_vel_mps);
+                    if (speed2 > 0.0 && std::isfinite(speed2))
+                    {
+                        const double u = std::clamp(-glm::dot(prev_delta, rel_vel_mps) /
+                                                            (speed2 * dt_s),
+                                                    0.0,
+                                                    1.0);
+                        probe_t_s = prev_t_s + u * dt_s;
+                    }
+                }
+
+                if (probe_t_s > prev_t_s + 1.0e-9 && probe_t_s < t_s - 1.0e-9)
+                {
+                    const double probe_sep2 =
+                            sample_sep2(probe_t_s, nullptr, nullptr, nullptr);
+                    if (!std::isfinite(probe_sep2))
+                    {
+                        return std::nullopt;
+                    }
+                    consider_best(probe_t_s, probe_sep2, prev_t_s, t_s);
+                }
+
+                const double mid_t_s = 0.5 * (prev_t_s + t_s);
+                if (std::abs(mid_t_s - probe_t_s) > 1.0e-6)
+                {
+                    const double mid_sep2 =
+                            sample_sep2(mid_t_s, nullptr, nullptr, nullptr);
+                    if (!std::isfinite(mid_sep2))
+                    {
+                        return std::nullopt;
+                    }
+                    consider_best(mid_t_s, mid_sep2, prev_t_s, t_s);
+                }
             }
+
             prev_t_s = t_s;
             prev_sep2 = sep2;
+            prev_subject_inertial = subject_inertial;
+            prev_target_inertial = target_inertial;
             (void) prev_sep2;
         }
 

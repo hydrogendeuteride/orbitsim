@@ -2,6 +2,7 @@
 
 #include "orbitsim/ephemeris.hpp"
 #include "orbitsim/game_sim.hpp"
+#include "orbitsim/kepler_events.hpp"
 #include "orbitsim/kepler_trajectory.hpp"
 #include "orbitsim/types.hpp"
 
@@ -274,6 +275,56 @@ namespace orbitsim
             return false;
         }
 
+        inline bool has_other_gravity_candidate_(const GameSimulation &sim, const BodyId current_primary_body_id)
+        {
+            for (const MassiveBody &body: sim.massive_bodies())
+            {
+                if (body.id != current_primary_body_id &&
+                    body.mass_kg > 0.0 &&
+                    std::isfinite(body.mass_kg))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        inline std::optional<double> next_exit_radius_time_(const KeplerArc &arc,
+                                                            const double radius_m,
+                                                            const double t_limit_s,
+                                                            const SoiTransitionSearchOptions &search_options)
+        {
+            if (!kepler_arc_valid(arc) ||
+                !(radius_m > 0.0) ||
+                !std::isfinite(radius_m) ||
+                !std::isfinite(t_limit_s) ||
+                t_limit_s <= arc.t0_s)
+            {
+                return std::nullopt;
+            }
+
+            const double t_end_s = std::min(t_limit_s, arc.t1_s);
+            if (!std::isfinite(t_end_s) || t_end_s <= arc.t0_s)
+            {
+                return std::nullopt;
+            }
+
+            KeplerRadiusCrossingOptions options{};
+            options.max_step_s = search_options.max_step_s;
+            options.refine_tolerance_s = search_options.refine_tolerance_s;
+            options.propagation = search_options.propagation;
+            for (const KeplerRadiusCrossingEvent &event :
+                 find_kepler_radius_crossings(arc, radius_m, t_end_s, options))
+            {
+                if (event.kind == KeplerRadiusCrossingKind::Exit &&
+                    event.t_s > arc.t0_s + 1.0e-9)
+                {
+                    return event.t_s;
+                }
+            }
+            return std::nullopt;
+        }
+
         inline std::optional<double>
         distance_to_body_m_(const GameSimulation &sim, const CelestialEphemeris &eph, const Vec3 &sc_pos_m,
                             const double t_s, const BodyId body_id)
@@ -493,7 +544,12 @@ namespace orbitsim
         {
             return out;
         }
-        if (!soi_detail::has_other_soi_candidate_(sim, current_primary_body_id))
+        const bool can_enter_other_soi =
+                soi_detail::has_other_soi_candidate_(sim, current_primary_body_id);
+        const bool can_fallback_to_other_gravity =
+                options.switch_options.fallback_to_max_accel &&
+                soi_detail::has_other_gravity_candidate_(sim, current_primary_body_id);
+        if (!can_enter_other_soi && !can_fallback_to_other_gravity)
         {
             return out;
         }
@@ -542,9 +598,9 @@ namespace orbitsim
             return detail::finite3_(*out_pos_m);
         };
 
-        auto distance_to_cached_body_m = [&](const CachedBodyPosition &cached,
-                                             const Vec3 &sc_pos_m,
-                                             const double t_s) -> std::optional<double> {
+        auto distance2_to_cached_body_m2 = [&](const CachedBodyPosition &cached,
+                                               const Vec3 &sc_pos_m,
+                                               const double t_s) -> std::optional<double> {
             Vec3 body_pos_m{};
             if (!body_position_at_cached(cached, t_s, &body_pos_m))
             {
@@ -556,7 +612,7 @@ namespace orbitsim
             {
                 return std::nullopt;
             }
-            return std::sqrt(d2);
+            return d2;
         };
 
         const double enter_scale =
@@ -585,11 +641,10 @@ namespace orbitsim
             soi_bodies.push_back(cached);
             has_other_soi_candidate = has_other_soi_candidate || (body.id != current_primary_body_id);
         }
-        if (!has_other_soi_candidate)
+        if (!has_other_soi_candidate && !can_fallback_to_other_gravity)
         {
             return out;
         }
-
         const CachedBodyPosition primary_body = make_cached_body_position(arc.primary_body_id);
         const CachedBodyPosition current_body = make_cached_body_position(current_primary_body_id);
         const bool current_soi_valid =
@@ -606,33 +661,50 @@ namespace orbitsim
         const double step_s = std::clamp(std::abs(options.max_step_s), 1.0e-6, abs_duration_s);
         const double tolerance_s = std::clamp(std::abs(options.refine_tolerance_s), 1.0e-9, step_s);
         const std::size_t max_steps = std::max<std::size_t>(1u, options.max_steps);
+        std::optional<double> current_exit_t_s{};
+        const double current_exit_radius_m = exit_scale * current_body.soi_radius_m;
+        if (dir > 0.0 &&
+            can_fallback_to_other_gravity &&
+            current_soi_valid &&
+            current_primary_body_id == arc.primary_body_id &&
+            current_exit_radius_m > 0.0 &&
+            std::isfinite(current_exit_radius_m))
+        {
+            current_exit_t_s =
+                    soi_detail::next_exit_radius_time_(arc,
+                                                       current_exit_radius_m,
+                                                       max_abs_t_s,
+                                                       options);
+        }
 
-        auto select_cached_primary_at = [&](const Vec3 &sc_pos_m, const double t_s) -> BodyId {
+        auto select_soi_primary_at = [&](const Vec3 &sc_pos_m, const double t_s) -> BodyId {
             std::optional<std::size_t> best_index{};
             double best_soi_m = 0.0;
-            double best_distance_m = 0.0;
-            double best_ratio = 0.0;
+            double best_distance2_m2 = 0.0;
+            double best_ratio2 = 0.0;
 
             for (std::size_t i = 0; i < soi_bodies.size(); ++i)
             {
                 const CachedBodyPosition &candidate = soi_bodies[i];
                 const double threshold_m = enter_scale * candidate.soi_radius_m;
-                const std::optional<double> distance_m =
-                        distance_to_cached_body_m(candidate, sc_pos_m, t_s);
-                if (!distance_m.has_value() || !(*distance_m <= threshold_m))
+                const double threshold2_m2 = threshold_m * threshold_m;
+                const std::optional<double> distance2_m2 =
+                        distance2_to_cached_body_m2(candidate, sc_pos_m, t_s);
+                if (!distance2_m2.has_value() || !(*distance2_m2 <= threshold2_m2))
                 {
                     continue;
                 }
 
-                const double ratio = candidate.soi_radius_m > 0.0
-                                             ? (*distance_m / candidate.soi_radius_m)
-                                             : std::numeric_limits<double>::infinity();
+                const double ratio2 = candidate.soi_radius_m > 0.0
+                                              ? (*distance2_m2 /
+                                                 (candidate.soi_radius_m * candidate.soi_radius_m))
+                                              : std::numeric_limits<double>::infinity();
                 if (!best_index.has_value())
                 {
                     best_index = i;
                     best_soi_m = candidate.soi_radius_m;
-                    best_distance_m = *distance_m;
-                    best_ratio = ratio;
+                    best_distance2_m2 = *distance2_m2;
+                    best_ratio2 = ratio2;
                     continue;
                 }
 
@@ -640,22 +712,22 @@ namespace orbitsim
                 {
                     if (candidate.soi_radius_m < best_soi_m ||
                         (soi_detail::near_equal_(candidate.soi_radius_m, best_soi_m) &&
-                         *distance_m < best_distance_m))
+                         *distance2_m2 < best_distance2_m2))
                     {
                         best_index = i;
                         best_soi_m = candidate.soi_radius_m;
-                        best_distance_m = *distance_m;
-                        best_ratio = ratio;
+                        best_distance2_m2 = *distance2_m2;
+                        best_ratio2 = ratio2;
                     }
                 }
-                else if (ratio < best_ratio ||
-                         (soi_detail::near_equal_(ratio, best_ratio) &&
-                          *distance_m < best_distance_m))
+                else if (ratio2 < best_ratio2 ||
+                         (soi_detail::near_equal_(ratio2, best_ratio2) &&
+                          *distance2_m2 < best_distance2_m2))
                 {
                     best_index = i;
                     best_soi_m = candidate.soi_radius_m;
-                    best_distance_m = *distance_m;
-                    best_ratio = ratio;
+                    best_distance2_m2 = *distance2_m2;
+                    best_ratio2 = ratio2;
                 }
             }
 
@@ -675,10 +747,11 @@ namespace orbitsim
                     return best.id;
                 }
 
-                const std::optional<double> current_distance_m =
-                        distance_to_cached_body_m(current_body, sc_pos_m, t_s);
-                if (current_distance_m.has_value() &&
-                    *current_distance_m <= exit_scale * current_body.soi_radius_m)
+                const std::optional<double> current_distance2_m2 =
+                        distance2_to_cached_body_m2(current_body, sc_pos_m, t_s);
+                const double current_exit_m = exit_scale * current_body.soi_radius_m;
+                if (current_distance2_m2.has_value() &&
+                    *current_distance2_m2 <= current_exit_m * current_exit_m)
                 {
                     return current_primary_body_id;
                 }
@@ -687,10 +760,11 @@ namespace orbitsim
 
             if (current_soi_valid)
             {
-                const std::optional<double> current_distance_m =
-                        distance_to_cached_body_m(current_body, sc_pos_m, t_s);
-                if (current_distance_m.has_value() &&
-                    *current_distance_m <= exit_scale * current_body.soi_radius_m)
+                const std::optional<double> current_distance2_m2 =
+                        distance2_to_cached_body_m2(current_body, sc_pos_m, t_s);
+                const double current_exit_m = exit_scale * current_body.soi_radius_m;
+                if (current_distance2_m2.has_value() &&
+                    *current_distance2_m2 <= current_exit_m * current_exit_m)
                 {
                     return current_primary_body_id;
                 }
@@ -699,36 +773,223 @@ namespace orbitsim
             return kInvalidBodyId;
         };
 
-        auto selected_primary_at = [&](const double t_s, KeplerStatus &status) -> BodyId {
+        auto select_fallback_primary_at = [&](const Vec3 &sc_pos_m, const double t_s) -> BodyId {
+            if (!options.switch_options.fallback_to_max_accel)
+            {
+                return kInvalidBodyId;
+            }
+            const std::optional<BodyId> best =
+                    soi_detail::select_primary_by_max_accel_(sim, eph, sc_pos_m, t_s);
+            return best.value_or(kInvalidBodyId);
+        };
+
+        auto spacecraft_position_at = [&](const double t_s,
+                                           KeplerStatus &status,
+                                           Vec3 &out_pos_m) -> bool {
             const KeplerArcSample sample = sample_kepler_arc_state(arc, t_s, options.propagation);
             if (!sample.ok())
             {
                 status = sample.diagnostics.status;
-                return kInvalidBodyId;
+                return false;
             }
 
             Vec3 primary_pos_m{};
             if (!body_position_at_cached(primary_body, t_s, &primary_pos_m))
             {
                 status = KeplerStatus::InvalidFinalState;
-                return kInvalidBodyId;
+                return false;
             }
 
-            const Vec3 inertial_position_m = primary_pos_m + sample.state_relative.position_m;
-            if (!detail::finite3_(inertial_position_m))
+            out_pos_m = primary_pos_m + sample.state_relative.position_m;
+            if (!detail::finite3_(out_pos_m))
             {
                 status = KeplerStatus::InvalidFinalState;
-                return kInvalidBodyId;
+                return false;
             }
 
             status = KeplerStatus::Ok;
-            return select_cached_primary_at(inertial_position_m, t_s);
+            return true;
+        };
+
+        auto selected_primary_at = [&](const double t_s,
+                                       KeplerStatus &status,
+                                       const bool allow_fallback) -> BodyId {
+            Vec3 sc_pos_m{};
+            if (!spacecraft_position_at(t_s, status, sc_pos_m))
+            {
+                return kInvalidBodyId;
+            }
+            const BodyId soi_primary = select_soi_primary_at(sc_pos_m, t_s);
+            if (soi_primary != kInvalidBodyId || !allow_fallback)
+            {
+                return soi_primary;
+            }
+            return select_fallback_primary_at(sc_pos_m, t_s);
+        };
+
+        struct TransitionCandidate
+        {
+            double t_s{0.0};
+            BodyId body_id{kInvalidBodyId};
+        };
+
+        auto transition_before = [&](const double a_s, const double b_s) {
+            return dir > 0.0 ? a_s < b_s : a_s > b_s;
+        };
+
+        auto keep_candidate = [&](std::optional<TransitionCandidate> &best,
+                                  const TransitionCandidate &candidate) {
+            if (candidate.body_id == kInvalidBodyId ||
+                candidate.body_id == current_primary_body_id)
+            {
+                return;
+            }
+            if (!best.has_value() || transition_before(candidate.t_s, best->t_s))
+            {
+                best = candidate;
+            }
+        };
+
+        auto refine_transition = [&](const double low_t_s,
+                                     const double high_t_s,
+                                     const BodyId selected,
+                                     const bool allow_fallback) -> std::optional<TransitionCandidate> {
+            double refined_low_t_s = low_t_s;
+            double refined_high_t_s = high_t_s;
+            BodyId high_primary = selected;
+            for (int i = 0; i < 96 && std::abs(refined_high_t_s - refined_low_t_s) > tolerance_s; ++i)
+            {
+                const double mid_t_s = 0.5 * (refined_low_t_s + refined_high_t_s);
+                KeplerStatus mid_status = KeplerStatus::Ok;
+                const BodyId mid_primary = selected_primary_at(mid_t_s,
+                                                               mid_status,
+                                                               allow_fallback);
+                ++out.tested_samples;
+                if (mid_status != KeplerStatus::Ok)
+                {
+                    out.first_failure = mid_status;
+                    return std::nullopt;
+                }
+                if (mid_primary != kInvalidBodyId && mid_primary != current_primary_body_id)
+                {
+                    refined_high_t_s = mid_t_s;
+                    high_primary = mid_primary;
+                }
+                else
+                {
+                    refined_low_t_s = mid_t_s;
+                }
+            }
+
+            return TransitionCandidate{
+                    .t_s = refined_high_t_s,
+                    .body_id = high_primary,
+            };
+        };
+
+        auto keep_transition = [&](std::optional<TransitionCandidate> &best,
+                                   const double low_t_s,
+                                   const double high_t_s,
+                                   const BodyId selected,
+                                   const bool allow_fallback) {
+            if (selected == kInvalidBodyId || selected == current_primary_body_id)
+            {
+                return true;
+            }
+
+            const std::optional<TransitionCandidate> refined =
+                    refine_transition(low_t_s, high_t_s, selected, allow_fallback);
+            if (!refined.has_value())
+            {
+                return false;
+            }
+            keep_candidate(best, *refined);
+            return true;
+        };
+
+        auto candidate_contains_at = [&](const CachedBodyPosition &candidate,
+                                         const double threshold_m,
+                                         const double t_s,
+                                         bool &sample_ok) {
+            sample_ok = false;
+            KeplerStatus status = KeplerStatus::Ok;
+            Vec3 sc_pos_m{};
+            if (!spacecraft_position_at(t_s, status, sc_pos_m))
+            {
+                out.first_failure = status;
+                return false;
+            }
+            sample_ok = true;
+
+            Vec3 body_pos_m{};
+            if (!body_position_at_cached(candidate, t_s, &body_pos_m))
+            {
+                return false;
+            }
+            const Vec3 delta_m = sc_pos_m - body_pos_m;
+            const double distance2_m2 = glm::dot(delta_m, delta_m);
+            return distance2_m2 <= threshold_m * threshold_m &&
+                   std::isfinite(distance2_m2);
+        };
+
+        auto refine_candidate_entry = [&](const CachedBodyPosition &candidate,
+                                          const double threshold_m,
+                                          const double low_t_s,
+                                          const double high_t_s)
+                -> std::optional<TransitionCandidate> {
+            bool sample_ok = false;
+            if (!candidate_contains_at(candidate, threshold_m, high_t_s, sample_ok))
+            {
+                return std::nullopt;
+            }
+
+            double low_s = low_t_s;
+            double high_s = high_t_s;
+            for (int i = 0; i < 96 && std::abs(high_s - low_s) > tolerance_s; ++i)
+            {
+                const double mid_s = 0.5 * (low_s + high_s);
+                if (candidate_contains_at(candidate, threshold_m, mid_s, sample_ok))
+                {
+                    high_s = mid_s;
+                }
+                else
+                {
+                    if (!sample_ok)
+                    {
+                        return std::nullopt;
+                    }
+                    low_s = mid_s;
+                }
+                ++out.tested_samples;
+            }
+
+            const double nudge_s = std::max(tolerance_s, 1.0e-6);
+            const double check_s = dir > 0.0
+                                           ? std::min(high_t_s, high_s + nudge_s)
+                                           : std::max(high_t_s, high_s - nudge_s);
+            KeplerStatus check_status = KeplerStatus::Ok;
+            const BodyId selected = selected_primary_at(check_s, check_status, false);
+            ++out.tested_samples;
+            if (check_status != KeplerStatus::Ok)
+            {
+                out.first_failure = check_status;
+                return std::nullopt;
+            }
+            if (selected != candidate.id)
+            {
+                return std::nullopt;
+            }
+
+            return TransitionCandidate{
+                    .t_s = high_s,
+                    .body_id = candidate.id,
+            };
         };
 
         double prev_t_s = arc.t0_s;
         KeplerStatus prev_status = KeplerStatus::Ok;
-        (void) selected_primary_at(prev_t_s, prev_status);
-        if (prev_status != KeplerStatus::Ok)
+        Vec3 prev_sc_pos_m{};
+        if (!spacecraft_position_at(prev_t_s, prev_status, prev_sc_pos_m))
         {
             out.first_failure = prev_status;
             return out;
@@ -741,45 +1002,122 @@ namespace orbitsim
             const double offset_s = std::min(abs_duration_s, step_s * static_cast<double>(step_index));
             const double t_s = arc.t0_s + dir * offset_s;
             KeplerStatus sample_status = KeplerStatus::Ok;
-            const BodyId selected = selected_primary_at(t_s, sample_status);
+            Vec3 sc_pos_m{};
+            const bool sample_ok = spacecraft_position_at(t_s, sample_status, sc_pos_m);
             ++out.tested_samples;
             out.last_tested_t_s = t_s;
-            if (sample_status != KeplerStatus::Ok)
+            if (!sample_ok)
             {
                 out.first_failure = sample_status;
                 return out;
             }
-
-            if (selected != kInvalidBodyId && selected != current_primary_body_id)
+            BodyId selected = select_soi_primary_at(sc_pos_m, t_s);
+            bool selected_uses_fallback = false;
+            if (selected == kInvalidBodyId && !current_soi_valid)
             {
-                double low_t_s = prev_t_s;
-                double high_t_s = t_s;
-                BodyId high_primary = selected;
-                for (int i = 0; i < 96 && std::abs(high_t_s - low_t_s) > tolerance_s; ++i)
+                selected = select_fallback_primary_at(sc_pos_m, t_s);
+                selected_uses_fallback = selected != kInvalidBodyId;
+            }
+            std::optional<TransitionCandidate> best_transition{};
+
+            if (!keep_transition(best_transition,
+                                 prev_t_s,
+                                 t_s,
+                                 selected,
+                                 selected_uses_fallback))
+            {
+                return out;
+            }
+
+            if (current_exit_t_s.has_value() &&
+                *current_exit_t_s > prev_t_s + 1.0e-9 &&
+                *current_exit_t_s < t_s - 1.0e-9)
+            {
+                const double nudge_s = std::max(tolerance_s, 1.0e-6);
+                const double probe_t_s = std::min(t_s, *current_exit_t_s + nudge_s);
+                KeplerStatus probe_status = KeplerStatus::Ok;
+                const BodyId probe_selected = selected_primary_at(probe_t_s,
+                                                                  probe_status,
+                                                                  true);
+                ++out.tested_samples;
+                if (probe_status != KeplerStatus::Ok)
                 {
-                    const double mid_t_s = 0.5 * (low_t_s + high_t_s);
-                    KeplerStatus mid_status = KeplerStatus::Ok;
-                    const BodyId mid_primary = selected_primary_at(mid_t_s, mid_status);
-                    ++out.tested_samples;
-                    if (mid_status != KeplerStatus::Ok)
-                    {
-                        out.first_failure = mid_status;
-                        return out;
-                    }
-                    if (mid_primary != kInvalidBodyId && mid_primary != current_primary_body_id)
-                    {
-                        high_t_s = mid_t_s;
-                        high_primary = mid_primary;
-                    }
-                    else
-                    {
-                        low_t_s = mid_t_s;
-                    }
+                    out.first_failure = probe_status;
+                    return out;
+                }
+                keep_candidate(best_transition,
+                               TransitionCandidate{
+                                       .t_s = *current_exit_t_s,
+                                       .body_id = probe_selected,
+                               });
+                current_exit_t_s.reset();
+            }
+
+            for (const CachedBodyPosition &candidate : soi_bodies)
+            {
+                if (candidate.id == current_primary_body_id)
+                {
+                    continue;
                 }
 
+                const double threshold_m = enter_scale * candidate.soi_radius_m;
+                if (!(threshold_m > 0.0) || !std::isfinite(threshold_m))
+                {
+                    continue;
+                }
+
+                Vec3 body_prev_pos_m{};
+                Vec3 body_pos_m{};
+                if (!body_position_at_cached(candidate, prev_t_s, &body_prev_pos_m) ||
+                    !body_position_at_cached(candidate, t_s, &body_pos_m))
+                {
+                    continue;
+                }
+
+                const Vec3 prev_delta_m = prev_sc_pos_m - body_prev_pos_m;
+                const Vec3 next_delta_m = sc_pos_m - body_pos_m;
+                const Vec3 segment_m = next_delta_m - prev_delta_m;
+                const double segment_len2_m2 = glm::dot(segment_m, segment_m);
+                double u = 0.5;
+                if (segment_len2_m2 > 0.0 && std::isfinite(segment_len2_m2))
+                {
+                    u = std::clamp(-glm::dot(prev_delta_m, segment_m) / segment_len2_m2,
+                                   0.0,
+                                   1.0);
+                }
+
+                const Vec3 closest_delta_m = prev_delta_m + u * segment_m;
+                const double closest_d2_m2 = glm::dot(closest_delta_m, closest_delta_m);
+                if (!(closest_d2_m2 <= threshold_m * threshold_m) ||
+                    !std::isfinite(closest_d2_m2))
+                {
+                    continue;
+                }
+
+                const double probe_t_s = prev_t_s + (t_s - prev_t_s) * u;
+                if (probe_t_s <= std::min(prev_t_s, t_s) + 1.0e-9 ||
+                    probe_t_s >= std::max(prev_t_s, t_s) - 1.0e-9)
+                {
+                    continue;
+                }
+
+                const std::optional<TransitionCandidate> transition =
+                        refine_candidate_entry(candidate, threshold_m, prev_t_s, probe_t_s);
+                if (out.first_failure != KeplerStatus::Ok)
+                {
+                    return out;
+                }
+                if (transition.has_value())
+                {
+                    keep_candidate(best_transition, *transition);
+                }
+            }
+
+            if (best_transition.has_value())
+            {
                 out.found = true;
-                out.to_primary_body_id = high_primary;
-                out.t_s = high_t_s;
+                out.to_primary_body_id = best_transition->body_id;
+                out.t_s = best_transition->t_s;
                 return out;
             }
 
@@ -789,6 +1127,7 @@ namespace orbitsim
                 break;
             }
             prev_t_s = t_s;
+            prev_sc_pos_m = sc_pos_m;
         }
 
         if (!reached_limit)
