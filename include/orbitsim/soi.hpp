@@ -658,9 +658,17 @@ namespace orbitsim
             return out;
         }
 
-        const double step_s = std::clamp(std::abs(options.max_step_s), 1.0e-6, abs_duration_s);
-        const double tolerance_s = std::clamp(std::abs(options.refine_tolerance_s), 1.0e-9, step_s);
         const std::size_t max_steps = std::max<std::size_t>(1u, options.max_steps);
+        const double configured_step_s =
+                std::clamp(std::abs(options.max_step_s), 1.0e-6, abs_duration_s);
+        // Treat max_steps as a scan budget, not as a reason to stop early.
+        // Long arcs get a coarser SOI scan step while short arcs retain the
+        // configured local step. Candidate entry still refines after detection.
+        const double budget_step_s = abs_duration_s / static_cast<double>(max_steps);
+        const double step_s = std::clamp(std::max(configured_step_s, budget_step_s),
+                                         1.0e-6,
+                                         abs_duration_s);
+        const double tolerance_s = std::clamp(std::abs(options.refine_tolerance_s), 1.0e-9, step_s);
         std::optional<double> current_exit_t_s{};
         const double current_exit_radius_m = exit_scale * current_body.soi_radius_m;
         if (dir > 0.0 &&
