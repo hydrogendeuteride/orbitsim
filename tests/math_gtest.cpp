@@ -65,6 +65,34 @@ TEST(Math, OrbitalElementsAboutAxisUsesSpinAxis)
     EXPECT_TRUE(std::isfinite(el.mean_anomaly_rad) || std::isnan(el.mean_anomaly_rad));
 }
 
+TEST(Math, RelativeStateFromOrbitalElementsAboutAxisUsesReferencePlane)
+{
+    const double mu = 3.986004418e14;
+    const double radius_m = 7'000'000.0;
+    const orbitsim::Vec3 ref_axis{0.0, -1.0, 0.0};
+
+    orbitsim::OrbitalElements el{};
+    el.semi_major_axis_m = radius_m;
+    el.eccentricity = 0.0;
+    el.inclination_rad = 0.0;
+    el.raan_rad = 0.0;
+    el.arg_periapsis_rad = 0.0;
+    el.true_anomaly_rad = 0.0;
+
+    const orbitsim::State state =
+            orbitsim::relative_state_from_orbital_elements_about_axis(mu, el, ref_axis);
+    const double expected_speed = std::sqrt(mu / radius_m);
+
+    EXPECT_TRUE(near_vec_abs(state.position_m, {radius_m, 0.0, 0.0}, 1e-9));
+    EXPECT_TRUE(near_vec_abs(state.velocity_mps, {0.0, 0.0, expected_speed}, 1e-12));
+
+    const orbitsim::OrbitalElements round_trip =
+            orbitsim::orbital_elements_from_relative_state_about_axis(
+                    mu, state.position_m, state.velocity_mps, ref_axis);
+    EXPECT_TRUE(near_abs(round_trip.inclination_rad, 0.0, 1e-9));
+    EXPECT_TRUE(near_rel(round_trip.semi_major_axis_m, radius_m, 1e-12, 1.0));
+}
+
 TEST(Math, ApsidesFromElementsMatchRadii)
 {
     const double mu = 3.986004418e14; // Earth mu [m^3/s^2]
@@ -93,4 +121,3 @@ TEST(Math, ApsidesFromElementsMatchRadii)
                               orbitsim::normalized_or(aps.apoapsis_rel_m, {-1.0, 0.0, 0.0}));
     EXPECT_LT(d, -0.999999);
 }
-

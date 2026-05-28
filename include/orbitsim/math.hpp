@@ -394,6 +394,22 @@ namespace orbitsim
                 sc_state_in.velocity_mps - primary_state_in.velocity_mps, ref_axis_unit_i);
     }
 
+    inline Vec3 orbital_reference_x_axis(const Vec3 &ref_axis_unit_i)
+    {
+        const Vec3 k = normalized_or(ref_axis_unit_i, Vec3{0.0, 0.0, 0.0});
+        if (!(glm::dot(k, k) > 0.0) || !std::isfinite(glm::dot(k, k)))
+        {
+            return Vec3{0.0, 0.0, 0.0};
+        }
+
+        Vec3 ref_x = Vec3{1.0, 0.0, 0.0} - glm::dot(Vec3{1.0, 0.0, 0.0}, k) * k;
+        if (glm::dot(ref_x, ref_x) <= 1e-24 || !std::isfinite(glm::dot(ref_x, ref_x)))
+        {
+            ref_x = Vec3{0.0, 1.0, 0.0} - glm::dot(Vec3{0.0, 1.0, 0.0}, k) * k;
+        }
+        return normalized_or(ref_x, Vec3{0.0, 0.0, 0.0});
+    }
+
     /**
      * @brief Convert orbital elements back to Cartesian state vector.
      *
@@ -457,6 +473,27 @@ namespace orbitsim
 
         out.position_m = r_pf.x * P + r_pf.y * Q;
         out.velocity_mps = v_pf.x * P + v_pf.y * Q;
+        return out;
+    }
+
+    inline State relative_state_from_orbital_elements_about_axis(const double mu_m3_s2, const OrbitalElements &el,
+                                                                const Vec3 &ref_axis_unit_i)
+    {
+        const Vec3 ref_z = normalized_or(ref_axis_unit_i, Vec3{0.0, 0.0, 0.0});
+        const Vec3 ref_x = orbital_reference_x_axis(ref_z);
+        const Vec3 ref_y = normalized_or(glm::cross(ref_z, ref_x), Vec3{0.0, 0.0, 0.0});
+        if (!(glm::dot(ref_x, ref_x) > 0.0) ||
+            !(glm::dot(ref_y, ref_y) > 0.0) ||
+            !(glm::dot(ref_z, ref_z) > 0.0))
+        {
+            return {};
+        }
+
+        const State local = relative_state_from_orbital_elements(mu_m3_s2, el);
+        State out = local;
+        out.position_m = local.position_m.x * ref_x + local.position_m.y * ref_y + local.position_m.z * ref_z;
+        out.velocity_mps = local.velocity_mps.x * ref_x + local.velocity_mps.y * ref_y + local.velocity_mps.z * ref_z;
+        out.spin.axis = local.spin.axis.x * ref_x + local.spin.axis.y * ref_y + local.spin.axis.z * ref_z;
         return out;
     }
 
