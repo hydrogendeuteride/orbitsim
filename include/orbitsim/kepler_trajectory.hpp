@@ -167,8 +167,28 @@ namespace orbitsim
             return out;
         }
 
+        // Closed orbits are periodic; fold large offsets near t0 so the
+        // universal-variable solve stays well-conditioned on long horizons.
+        double dt_s = t_s - arc.t0_s;
+        const double r0 = glm::length(arc.state0_relative.position_m);
+        const double v0 = glm::length(arc.state0_relative.velocity_mps);
+        if (r0 > 0.0 && std::isfinite(r0) && std::isfinite(v0))
+        {
+            const double alpha = 2.0 / r0 - (v0 * v0) / arc.mu_m3_s2;
+            if (alpha > 0.0 && std::isfinite(alpha))
+            {
+                const double two_pi = 2.0 * std::acos(-1.0);
+                const double period_s =
+                        two_pi / (std::sqrt(arc.mu_m3_s2) * alpha * std::sqrt(alpha));
+                if (period_s > 0.0 && std::isfinite(period_s))
+                {
+                    dt_s = std::remainder(dt_s, period_s);
+                }
+            }
+        }
+
         const KeplerPropagationResult step =
-                propagate_kepler_universal_safe(arc.mu_m3_s2, arc.state0_relative, t_s - arc.t0_s, opt);
+                propagate_kepler_universal_safe(arc.mu_m3_s2, arc.state0_relative, dt_s, opt);
         out.state_relative = step.state;
         out.diagnostics = step.diagnostics;
         if (!out.ok())
