@@ -29,6 +29,29 @@ namespace orbitsim
         Hyperbolic,
     };
 
+    inline constexpr double kNearParabolicEccentricityEpsilon = 1.0e-8;
+
+    inline KeplerOrbitRegime classify_kepler_orbit_regime(
+            const double eccentricity,
+            const double near_parabolic_epsilon = kNearParabolicEccentricityEpsilon)
+    {
+        if (!std::isfinite(eccentricity))
+        {
+            return KeplerOrbitRegime::Unknown;
+        }
+
+        const double epsilon = std::max(0.0, near_parabolic_epsilon);
+        if (eccentricity < 1.0 - epsilon)
+        {
+            return KeplerOrbitRegime::Elliptic;
+        }
+        if (eccentricity > 1.0 + epsilon)
+        {
+            return KeplerOrbitRegime::Hyperbolic;
+        }
+        return KeplerOrbitRegime::NearParabolic;
+    }
+
     struct KeplerPropagationOptions
     {
         int max_iterations{64};

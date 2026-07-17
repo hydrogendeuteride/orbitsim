@@ -314,7 +314,7 @@ namespace orbitsim
             options.refine_tolerance_s = search_options.refine_tolerance_s;
             options.propagation = search_options.propagation;
             for (const KeplerRadiusCrossingEvent &event :
-                 find_kepler_radius_crossings(arc, radius_m, t_end_s, options))
+                 find_kepler_crossings(arc, radius_m, t_end_s, options))
             {
                 if (event.kind == KeplerRadiusCrossingKind::Exit &&
                     event.t_s > arc.t0_s + 1.0e-9)
